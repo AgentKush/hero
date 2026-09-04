@@ -1,0 +1,393 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime"
+                    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                    xmlns:po="http://schemas.microsoft.com/winfx/2006/xaml/presentation/options"
+                    mc:Ignorable="po">
+
+    <!--
+        HERO component layer. Merge this AFTER UI/Theme.xaml:
+
+            <ResourceDictionary Source="UI/Theme.xaml" />
+            <ResourceDictionary Source="UI/Theme.Controls.xaml" />
+
+        Two things live here and nothing else:
+
+        1. Interaction-state tokens the signature controls look up by name. Theme.xaml has resting
+           surfaces only; hover, pressed, selected and focus have to exist somewhere, and they are
+           where hand-tuned palettes usually fail their contrast check.
+        2. Reusable text and button styles for the screens, all KEYED. There are deliberately no
+           implicit TargetType styles here except ToolTip, so merging this file cannot silently
+           restyle something another part of the app already owns.
+
+        The signature controls (ScoreRing, SeverityPill, Sparkline, DataTable, NavigationRail)
+        render themselves in code and reference every value below through a dynamic resource
+        lookup with a compiled-in fallback. They therefore degrade gracefully rather than
+        disappearing if this dictionary is ever missing — but the fallbacks are duplicates, so
+        retheming only works properly once this file is merged.
+
+        po:Freeze is declared with mc:Ignorable so it is a real freeze instruction where supported
+        and an ignorable attribute elsewhere, rather than a parse-time error.
+    -->
+
+    <!-- ============ Interaction-state surfaces ============
+         These sit between Theme.xaml's Surface1 (#151A21) and Surface3 (#242D38). Hover is a
+         small lift, pressed is a larger one, and selected is accent-TINTED rather than grey so a
+         selected row cannot be mistaken for a hovered one. -->
+    <SolidColorBrush x:Key="SurfaceHover"    Color="#1F252D" po:Freeze="True" />
+    <SolidColorBrush x:Key="SurfacePressed"  Color="#252D37" po:Freeze="True" />
+    <SolidColorBrush x:Key="SurfaceSelected" Color="#16263D" po:Freeze="True" />
+
+    <!-- Ring track, progress trough, sparkline baseline, scrollbar trough. -->
+    <SolidColorBrush x:Key="SurfaceTrack"    Color="#242D38" po:Freeze="True" />
+
+    <!-- Input wells, evidence blocks, code/path blocks. -->
+    <SolidColorBrush x:Key="SurfaceInset"    Color="#0E1116" po:Freeze="True" />
+
+    <!-- ============ Borders ============
+         Border.Strong is deliberately lighter than a typical dark-theme outline. At the obvious
+         value (#3D4650) a text-input outline is 1.8:1 against its own card, which fails the 3:1
+         that WCAG 1.4.11 requires of a UI component boundary; #606A78 measures 3.18:1 on
+         Surface2 and 3.48:1 on the inset well. Do not darken it back during a polish pass. -->
+    <SolidColorBrush x:Key="BorderStrong"    Color="#606A78" po:Freeze="True" />
+    <SolidColorBrush x:Key="BorderFocus"     Color="#7FB1FF" po:Freeze="True" />
+
+    <!-- ============ Extra semantics ============ -->
+    <SolidColorBrush x:Key="SevInfo"         Color="#96A2B2" po:Freeze="True" />
+    <SolidColorBrush x:Key="TextDisabled"    Color="#6B7481" po:Freeze="True" />
+    <SolidColorBrush x:Key="AccentGraphic"   Color="#4C8DFF" po:Freeze="True" />
+    <SolidColorBrush x:Key="DangerFill"      Color="#B8323A" po:Freeze="True" />
+    <SolidColorBrush x:Key="DangerHover"     Color="#CC3A43" po:Freeze="True" />
+    <SolidColorBrush x:Key="DangerPressed"   Color="#9E2A31" po:Freeze="True" />
+
+    <!-- Selection inside text inputs. Accent at 35% keeps the selected glyphs readable. -->
+    <SolidColorBrush x:Key="SelectionFill"   Color="#594C8DFF" po:Freeze="True" />
+
+    <!-- ============ Motion ============
+         Four durations, and nothing between them. Exits run at roughly 55% of the matching
+         entrance. Only Opacity, RenderTransform sub-properties, Color and custom AffectsRender
+         properties may be animated — never Width, Height, Margin, Padding or CornerRadius, each
+         of which re-runs layout for the subtree on every frame. -->
+    <Duration x:Key="MotionInstant">0:0:0.09</Duration>
+    <Duration x:Key="MotionFast">0:0:0.14</Duration>
+    <Duration x:Key="MotionBase">0:0:0.22</Duration>
+    <Duration x:Key="MotionSlow">0:0:0.32</Duration>
+    <Duration x:Key="MotionValue">0:0:0.70</Duration>
+
+    <sys:Double x:Key="RadiusCard">14</sys:Double>
+    <sys:Double x:Key="RadiusControl">10</sys:Double>
+    <sys:Double x:Key="RadiusChip">6</sys:Double>
+
+    <!-- ============ Typography ============
+         Every text element in a screen should map to exactly one of these. There are no ad-hoc
+         font sizes in HERO.
+
+         Two rules encoded here that are easy to get wrong:
+         * LineHeight without LineStackingStrategy="BlockLineHeight" is silently ignored whenever
+           the requested height is smaller than the font's natural line box, so half the scale
+           appears to work and the other half quietly does not.
+         * TextFormattingMode is Display below 20px (pixel-snapped stems, sharp) and Ideal at or
+           above it (Display distorts Segoe UI Variable's outlines at display sizes).
+         Weights are 400/600/700 only. The installed Segoe UI Variable exposes 300/350/400/600/700
+         and no 500, so a FontWeight="Medium" request silently snaps to a neighbouring face and
+         produces inconsistent stems across the app. There are no true italics either. -->
+
+    <Style x:Key="Type.Display" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsDisplay}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <Style x:Key="Type.Title" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsTitle}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <Style x:Key="Type.Section" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsSection}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <Style x:Key="Type.BodyStrong" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource UIFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsBodyLarge}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <Style x:Key="Type.Body" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource UIFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsBody}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="Type.Caption" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource UIFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsCaption}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextTertiary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <!-- Uppercase column and section headings. Set the text uppercase at the source; there is no
+         text-transform in WPF and a converter for it is not worth a per-element binding. -->
+    <Style x:Key="Type.Overline" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource UIFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsMicro}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{DynamicResource TextTertiary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <!-- Monospace is mandatory for anything the user may compare character by character or paste
+         into a terminal: paths, command lines, hashes, registry keys, PIDs, addresses, ports,
+         service names, certificate subjects, raw evidence blobs. It is FORBIDDEN for prose,
+         buttons, nav labels and publisher names — a monospaced "Microsoft Windows Publisher"
+         turns a row into a log dump. Cascadia MONO, never Cascadia Code: Code has programming
+         ligatures, so a path containing -> renders as a glyph the user cannot match against the
+         real string, which is unacceptable in a security tool. -->
+    <Style x:Key="Type.Mono" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{DynamicResource MonoFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsMono}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+    </Style>
+
+    <Style x:Key="Type.MonoMicro" TargetType="TextBlock" BasedOn="{StaticResource Type.Mono}">
+        <Setter Property="FontSize" Value="{DynamicResource FsMicro}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextTertiary}" />
+    </Style>
+
+    <!-- ============ Containers ============ -->
+
+    <Style x:Key="Surface.Inset" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource SurfaceInset}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Divider}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="8" />
+        <Setter Property="Padding" Value="12,10" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="UseLayoutRounding" Value="True" />
+    </Style>
+
+    <Style x:Key="Divider.H" TargetType="Border">
+        <Setter Property="Height" Value="1" />
+        <Setter Property="Background" Value="{DynamicResource Divider}" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+    </Style>
+
+    <!-- A square-ish chip, deliberately a different shape from a severity pill so the two are
+         distinguishable at a glance without reading either. -->
+    <Style x:Key="Chip.Status" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource SurfaceInset}" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Padding" Value="9,3" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="UseLayoutRounding" Value="True" />
+    </Style>
+
+    <!-- ============ Buttons ============
+         The universal pattern: OverridesDefaultStyle so no stock chrome survives underneath,
+         FocusVisualStyle cleared and replaced by a drawn ring, and a template that is one Border
+         plus a ContentPresenter. A control that looks 90% right but carries an unexplained 1px
+         bevel or a mouse-over glow is missing OverridesDefaultStyle.
+
+         The press feedback is a ScaleTransform, never a size change. -->
+
+    <ControlTemplate x:Key="Btn.Template" TargetType="Button">
+        <Grid x:Name="Root" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform>
+                <ScaleTransform ScaleX="1" ScaleY="1" />
+            </Grid.RenderTransform>
+
+            <Border x:Name="Bg"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="8"
+                    SnapsToDevicePixels="True">
+                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center"
+                                  RecognizesAccessKey="True" />
+            </Border>
+
+            <!-- Drawn focus ring, 2px outside the control bounds and only on keyboard focus.
+                 Never shown for a mouse press, or it fires on every click. -->
+            <Border x:Name="Focus"
+                    Margin="-3"
+                    BorderBrush="{DynamicResource BorderFocus}"
+                    BorderThickness="2"
+                    CornerRadius="11"
+                    Opacity="0"
+                    IsHitTestVisible="False" />
+        </Grid>
+
+        <ControlTemplate.Triggers>
+            <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Focus" Property="Opacity" Value="1" />
+            </Trigger>
+            <!-- Press feedback is a scale, never a size change: scaling is a render-only
+                 transform, whereas nudging Width/Padding re-runs layout on every press. -->
+            <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Root" Property="RenderTransform">
+                    <Setter.Value>
+                        <ScaleTransform ScaleX="0.97" ScaleY="0.97" />
+                    </Setter.Value>
+                </Setter>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{DynamicResource TextDisabled}" />
+                <Setter TargetName="Bg" Property="Opacity" Value="0.55" />
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <Style x:Key="Btn.Base" TargetType="Button">
+        <Setter Property="OverridesDefaultStyle" Value="True" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="UseLayoutRounding" Value="True" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="Padding" Value="16,0" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontFamily" Value="{DynamicResource UIFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsBody}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="Template" Value="{StaticResource Btn.Template}" />
+    </Style>
+
+    <Style x:Key="Btn.Primary" TargetType="Button" BasedOn="{StaticResource Btn.Base}">
+        <Setter Property="Background" Value="#2F6FE0" />
+        <Setter Property="Foreground" Value="#FFFFFF" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="#3A72DE" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="#275FC4" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="Btn.Secondary" TargetType="Button" BasedOn="{StaticResource Btn.Base}">
+        <Setter Property="Background" Value="{DynamicResource Surface2}" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="BorderBrush" Value="{DynamicResource HairLine}" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{DynamicResource SurfacePressed}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="Btn.Ghost" TargetType="Button" BasedOn="{StaticResource Btn.Base}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+                <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{DynamicResource SurfacePressed}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- Destructive actions get a filled button only where the action is confirmed elsewhere.
+         Anything irreversible (delete forever, purge restore points) belongs behind a typed
+         confirmation, not behind a red button. -->
+    <Style x:Key="Btn.Danger" TargetType="Button" BasedOn="{StaticResource Btn.Base}">
+        <Setter Property="Background" Value="{DynamicResource DangerFill}" />
+        <Setter Property="Foreground" Value="#FFFFFF" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{DynamicResource DangerHover}" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{DynamicResource DangerPressed}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="Btn.DangerGhost" TargetType="Button" BasedOn="{StaticResource Btn.Ghost}">
+        <Setter Property="Foreground" Value="{DynamicResource SevCritical}" />
+    </Style>
+
+    <!-- Square icon button. AutomationProperties.Name is NOT optional on these: an icon-only
+         control with no name is announced as "button" and nothing else. -->
+    <Style x:Key="Btn.Icon" TargetType="Button" BasedOn="{StaticResource Btn.Ghost}">
+        <Setter Property="Width" Value="36" />
+        <Setter Property="Height" Value="36" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets" />
+        <Setter Property="FontSize" Value="16" />
+        <Setter Property="FontWeight" Value="Normal" />
+    </Style>
+
+    <!-- ============ ToolTip ============
+         The one implicit style in this file. The stock tooltip is a pale-yellow Win32 relic and
+         appears inside every control here, so leaving it is not an option. -->
+    <Style TargetType="ToolTip">
+        <Setter Property="OverridesDefaultStyle" Value="True" />
+        <Setter Property="HasDropShadow" Value="False" />
+        <Setter Property="Placement" Value="Bottom" />
+        <Setter Property="HorizontalOffset" Value="0" />
+        <Setter Property="VerticalOffset" Value="6" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+        <Setter Property="FontFamily" Value="{DynamicResource UIFont}" />
+        <Setter Property="FontSize" Value="{DynamicResource FsCaption}" />
+        <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToolTip">
+                    <Border Background="{DynamicResource Surface3}"
+                            BorderBrush="{DynamicResource HairLine}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="10,6"
+                            MaxWidth="360"
+                            SnapsToDevicePixels="True"
+                            UseLayoutRounding="True">
+                        <ContentPresenter />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ============ Convenience sizes ============
+         Bind these rather than hard-coding pixel sizes at call sites: this machine's primary
+         display is 4096x2160 at 125%, so a value tuned on a 1080p mock reads as tiny here. -->
+    <sys:Double x:Key="ScoreRingSize">200</sys:Double>
+    <sys:Double x:Key="SparklineHeight">48</sys:Double>
+    <sys:Double x:Key="TableRowHeight">40</sys:Double>
+    <sys:Double x:Key="TableHeaderHeight">36</sys:Double>
+
+</ResourceDictionary>

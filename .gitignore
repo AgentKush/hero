@@ -1,0 +1,18 @@
+# Build output. Reproducible from source with `dotnet build`, and large: bin/ and obj/ under
+# src/ are ~60 MB, dist/ another 27 MB.
+bin/
+obj/
+dist/
+
+# Visual Studio / Rider / VS Code local state
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Local run artefacts. HERO writes its real state to %ProgramData%\HERO, not here, but a
+# developer build launched from the source tree can leave these behind.
+*.log
+launchSettings.json
+.claude/launch.json

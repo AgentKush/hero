@@ -1,0 +1,73 @@
+<Window x:Class="Hero.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        Title="HERO" Icon="Assets/hero.ico" Height="1020" Width="1560" MinHeight="620" MinWidth="960"
+        WindowStartupLocation="CenterScreen"
+        Foreground="{StaticResource TextPrimary}"
+        FontFamily="{StaticResource UIFont}"
+        FontSize="{StaticResource FsBody}"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType"
+        UseLayoutRounding="True">
+
+    <!-- Custom chrome: the stock Windows title bar cannot be themed and would break the
+         edge-to-edge look. CaptionHeight reserves the drag region; GlassFrameThickness=0
+         with a resize border keeps snap layouts and edge resize intact. -->
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="46"
+                            CornerRadius="0"
+                            GlassFrameThickness="0"
+                            ResizeBorderThickness="6"
+                            UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
+
+    <!-- Root scale host. The transform is driven from code-behind so type and spacing grow with
+         the window, which matters on this machine's 4096x2160 primary display. -->
+    <Grid x:Name="ScaleHost">
+        <Grid.LayoutTransform>
+            <ScaleTransform x:Name="RootScale" ScaleX="1" ScaleY="1" />
+        </Grid.LayoutTransform>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- The navigation rail is created in code-behind so it shares the control library
+                 with everything else rather than being half XAML, half code. -->
+            <Border Grid.Column="0" x:Name="RailHost" Background="#B3151A21" />
+
+            <Grid Grid.Column="1" Background="#8C0E1116">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="46" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="30,0,0,0">
+                        <Ellipse x:Name="LiveDot" Width="7" Height="7" Margin="0,0,9,0"
+                                 Fill="{StaticResource SevSafe}" VerticalAlignment="Center" />
+                        <TextBlock x:Name="CrumbText" Text="Overview" VerticalAlignment="Center"
+                                   FontSize="{StaticResource FsCaption}"
+                                   Foreground="{StaticResource TextSecondary}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                                shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                        <Button Content="&#xE921;" Click="OnMinimise" Style="{StaticResource CaptionButton}" />
+                        <Button Content="&#xE922;" Click="OnMaximise" Style="{StaticResource CaptionButton}" />
+                        <Button Content="&#xE8BB;" Click="OnCloseToTray" Style="{StaticResource CaptionCloseButton}" />
+                    </StackPanel>
+                </Grid>
+
+                <ScrollViewer x:Name="MainScroll" Grid.Row="1"
+                              VerticalScrollBarVisibility="Auto"
+                              Padding="30,8,30,30"
+                              RequestBringIntoView="OnSuppressBringIntoView">
+                    <ContentPresenter x:Name="PageHost" />
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

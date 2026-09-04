@@ -1,0 +1,70 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <RootNamespace>Hero</RootNamespace>
+    <AssemblyName>HERO</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- WinForms is referenced solely for the in-box NotifyIcon tray support. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Without this the exe carries the stock .NET icon in the taskbar, Alt+Tab and Explorer. -->
+    <ApplicationIcon>Assets\hero.ico</ApplicationIcon>
+    <Product>HERO</Product>
+    <AssemblyTitle>HERO — Help Eliminate Rogue Oddities</AssemblyTitle>
+    <Company>HERO</Company>
+    <Version>1.0.0</Version>
+    <!-- WPF cannot be trimmed: XAML resolves types by reflection at runtime. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <SelfContained>false</SelfContained>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- CA1416: platform guard noise (this app is Windows-only by construction).
+         WFO0003: a WinForms analyzer demanding DPI be set via Application.SetHighDpiMode.
+         That is WinForms-specific advice; WPF requires the manifest declaration, and
+         WinForms is present here only for NotifyIcon. -->
+    <NoWarn>$(NoWarn);CA1416;WFO0003</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    `Path`, `File` and `Brush`/`Image` collide between System.IO / System.Windows.Shapes /
+    System.Drawing once UseWPF and UseWindowsForms are both on. Global aliases keep every
+    source file unambiguous without per-file using clutter.
+  -->
+  <ItemGroup>
+    <!--
+      UseWindowsForms injects a global `using System.Windows.Forms`, which makes
+      `Application`, `MessageBox`, `Clipboard`, `Cursor` and `Brush` ambiguous with their
+      WPF counterparts. WPF is the primary framework here, so the WinForms global using is
+      removed and the handful of WinForms types we need (NotifyIcon, Screen) are reached
+      through the WinForms alias below.
+    -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <!-- System.Windows.Shapes.Path shadows System.IO.Path, which is used constantly here. -->
+    <Using Remove="System.Windows.Shapes" />
+
+    <Using Include="System.Windows.Forms" Alias="WinForms" />
+    <Using Include="System.Drawing" Alias="Gdi" />
+
+    <!-- With Shapes and Drawing removed, bare Path/File/Directory mean System.IO as expected. -->
+    <Using Include="System.IO" />
+    <Using Include="System.Collections.ObjectModel" />
+    <Using Include="System.Diagnostics" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\hero.ico" />
+  </ItemGroup>
+
+</Project>

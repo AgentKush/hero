@@ -91,6 +91,22 @@ dotnet run --project "D:\My projects\hero\src\Hero\Hero.csproj"
 
 Pass `--tray` to start hidden in the system tray, which is how it runs at logon.
 
+To produce the single-file build that gets handed to a tester — one self-contained
+`HERO.exe` with the .NET runtime inside it, so the machine it lands on needs nothing
+installed:
+
+```bash
+dotnet publish src/Hero/Hero.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/test
+```
+
+That command lives here because it has to. `Hero.csproj` sets `SelfContained` to false
+and names no runtime identifier, so those switches are the only record of how the
+distributed artefact differs from a `dotnet build` — and `dist/` is gitignored. Without
+this line the thing people actually run could not be reproduced from the repository.
+
+Double-clicking that `HERO.exe` starts the app. Installation is behind `--setup`, which
+is what `Install HERO.cmd` in the test package invokes.
+
 HERO ships `asInvoker` and deliberately does **not** request administrator rights at launch. A tray
 app that triggers a UAC prompt on every boot teaches you to click through prompts, which is a net
 security loss. Operations that genuinely need elevation ask for it, individually, at the moment

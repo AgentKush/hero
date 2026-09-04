@@ -170,6 +170,15 @@ internal sealed class QuarantineVault
             }
             catch (Exception ex)
             {
+                // PUT THE ATTRIBUTES BACK FIRST. They were cleared a few lines above so the move
+                // could not be refused on attributes alone — but the move did not happen, so the
+                // file is still sitting at its original path, and it must be left exactly as it was
+                // found. Hidden and System are load-bearing on system files, ReadOnly is often the
+                // only thing protecting a file from the next careless write, and the manifest that
+                // recorded all three is about to be deleted. Every failed quarantine used to strip
+                // them permanently and then destroy the only record of what they had been.
+                try { File.SetAttributes(path, manifest.OriginalAttributes); } catch { }
+
                 try { File.Delete(manifestPath); } catch { }
 
                 // Windows returns ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED when antivirus is
@@ -252,13 +261,68 @@ internal sealed class QuarantineVault
             if (File.Exists(manifest.OriginalPath) && !overwrite)
                 return new(false, $"Something already exists at {manifest.OriginalPath}.", manifest);
 
-            // Undo the mask before moving back, otherwise the restored file is corrupt.
-            if (manifest.ContentEncoded) MaskInPlace(vaultPath);
+            // ---------------------------------------------------------------- decode, then verify,
+            //                                                                   and only then commit
+            //
+            // THE VAULT COPY IS NEVER MUTATED. Restore used to un-mask the payload in place and then
+            // move it, which is two destructive steps with the only copy of the user's file in
+            // between. A failed move left a plaintext payload behind a manifest still marked
+            // encoded, so the retry every user makes un-masked it a SECOND time — XOR is its own
+            // inverse — and moved the re-masked bytes into place while reporting "Restored to ...".
+            // The file was gone and HERO said it was back.
+            //
+            // Decoding into a sibling file leaves the vault intact until the destination exists, so
+            // every failure below is retryable and none of them can lose the file.
+            string staging = Path.Combine(VaultDirectory, id + ".restoring");
 
-            var dir = Path.GetDirectoryName(manifest.OriginalPath);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            try
+            {
+                File.Copy(vaultPath, staging, overwrite: true);
+                if (manifest.ContentEncoded) MaskInPlace(staging);
 
-            File.Move(vaultPath, manifest.OriginalPath, overwrite);
+                // THE RECORDED HASH IS CHECKED. It was written at quarantine time and then never
+                // looked at again, which meant nothing in the product could tell a good restore
+                // from a corrupt one.
+                //
+                // It also settles the mask flag independently of the manifest, and that matters
+                // because the flag is not trustworthy: masking is a separate step after the move,
+                // so a crash between them — or a mask that failed part way through a large file —
+                // leaves the payload in a state the boolean does not describe. Rather than trust it,
+                // try the other reading and let the hash decide.
+                if (manifest.Sha256.Length > 0)
+                {
+                    if (!HashMatches(staging, manifest.Sha256))
+                    {
+                        MaskInPlace(staging);           // self-inverse: this is the other reading
+
+                        if (!HashMatches(staging, manifest.Sha256))
+                        {
+                            TryDelete(staging);
+                            return new(false,
+                                "The quarantined copy no longer matches what was taken. HERO recorded " +
+                                "a SHA-256 of the original file and neither the stored bytes nor their " +
+                                "unmasked form match it, so restoring would put a corrupt file back. " +
+                                "The vault copy has been left untouched.",
+                                manifest);
+                        }
+                    }
+                }
+
+                var dir = Path.GetDirectoryName(manifest.OriginalPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+                File.Move(staging, manifest.OriginalPath, overwrite);
+            }
+            catch
+            {
+                TryDelete(staging);
+                throw;
+            }
+
+            // The destination now exists and has been verified, so the vault copy is redundant.
+            // Deleted after the move rather than before it, which is what makes every step above
+            // safe to retry.
+            TryDelete(vaultPath);
 
             // Restore metadata. Timestamps matter: forensic timelines and incremental backups
             // both key off them.
@@ -311,8 +375,17 @@ internal sealed class QuarantineVault
             }
             catch { /* the file is back; an imperfect ACL beats refusing to restore it */ }
 
-            File.Delete(manifestPath);
-            return new(true, $"Restored to {manifest.OriginalPath}", manifest);
+            // Best-effort: the file is back where it belongs, which is the thing that was asked for.
+            // Failing the whole operation over a leftover manifest would be a worse answer.
+            TryDelete(manifestPath);
+
+            return new(true,
+                manifest.Sha256.Length > 0
+                    ? $"Restored to {manifest.OriginalPath}, byte-for-byte — the restored file matches " +
+                      "the SHA-256 recorded when it was quarantined."
+                    : $"Restored to {manifest.OriginalPath}. HERO could not read the file to hash it " +
+                      "when it was quarantined, so the contents could not be checked against a record.",
+                manifest);
         }
         catch (Exception ex)
         {
@@ -404,6 +477,29 @@ internal sealed class QuarantineVault
     /// </summary>
     private static bool IsAntivirusBlock(Exception ex) =>
         ex.HResult is ERROR_VIRUS_INFECTED or ERROR_VIRUS_DELETED;
+
+    /// <summary>Deletes a file if it is there, and never throws. Used on paths that are cleanup.</summary>
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> hashes to <paramref name="expected"/>.
+    ///
+    /// A read failure is NOT a match. This gates whether a file is handed back to the user, so the
+    /// only acceptable answer to "I could not check" is no.
+    /// </summary>
+    private static bool HashMatches(string path, string expected)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return Convert.ToHexString(SHA256.HashData(fs))
+                          .Equals(expected, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
 
     /// <summary>
     /// XOR the file with a repeating mask, in place. Self-inverse, so the same call restores it.

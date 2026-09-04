@@ -142,6 +142,22 @@ Signature verification runs with revocation checking disabled specifically so it
 CRL/OCSP endpoints and leak an inventory of your software, and file verdicts come from Windows
 Defender running locally rather than from a third-party API.
 
+## Licence
+
+[Apache License 2.0](LICENSE). Copyright © 2026 AgentKush.
+
+Free to use, modify and redistribute, including commercially, provided the licence
+and [`NOTICE`](NOTICE) travel with it. It carries an express patent grant, and — the
+part that matters most for a tool that can terminate processes and delete files —
+it is supplied **as is, without warranties or conditions of any kind**, and the
+author accepts no liability for damages arising from its use. Read sections 7 and 8
+before running it on a machine holding anything you cannot lose.
+
+A self-contained build embeds Microsoft's .NET runtime and WPF assemblies, which are
+MIT-licensed; their notices are in [`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt)
+and must ship with any copy of that binary. HERO itself takes no third-party
+dependencies.
+
 ## Documentation
 
 - [`docs/PLATFORM-FACTS.md`](docs/PLATFORM-FACTS.md) — measured platform truths. Every number was

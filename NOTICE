@@ -1,0 +1,37 @@
+HERO — Help Eliminate Rogue Oddities
+Copyright 2026 AgentKush
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may not use this file except in compliance with the License. A copy of the
+License is in the LICENSE file beside this one, and at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+
+THIRD-PARTY SOFTWARE
+--------------------
+
+HERO takes no NuGet dependencies. It is built entirely against the .NET base
+class libraries, WPF, and in-box Windows APIs. There is no vendored third-party
+source in this repository.
+
+The self-contained build is the one exception, and it is a packaging one rather
+than a source one: `dotnet publish --self-contained` embeds the .NET runtime and
+the WPF assemblies into the single HERO.exe it produces. Those are Microsoft's
+work, licensed under the MIT License, and the MIT License requires its notice to
+travel with substantial portions of the software.
+
+The .NET SDK does not copy those notices into publish output, so they are shipped
+alongside the binary deliberately. They are reproduced in
+THIRD-PARTY-NOTICES.txt, taken verbatim from the runtime pack that produced the
+build (microsoft.netcore.app.runtime.win-x64).
+
+Microsoft.Windows.SDK.NET.dll, present in the framework-dependent build, ships
+under the Windows SDK licence terms rather than MIT. Those terms permit
+redistribution inside an application and impose no notice condition, so nothing
+is required here for it. See https://aka.ms/WinSDKLicenseURL.

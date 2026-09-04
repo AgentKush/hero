@@ -22,6 +22,11 @@
     <AssemblyTitle>HERO — Help Eliminate Rogue Oddities</AssemblyTitle>
     <Company>HERO</Company>
     <Version>1.0.0</Version>
+    <!-- Without these the shipped binary asserts no ownership at all: LegalCopyright defaults to
+         the SDK's placeholder single space, so the file properties of an unsigned executable that
+         installs a LocalSystem service named nobody. -->
+    <Copyright>Copyright © 2026 AgentKush</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <!-- WPF cannot be trimmed: XAML resolves types by reflection at runtime. -->
     <PublishTrimmed>false</PublishTrimmed>
     <SelfContained>false</SelfContained>

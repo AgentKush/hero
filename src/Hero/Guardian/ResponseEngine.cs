@@ -2427,6 +2427,11 @@ internal sealed class ResponseEngine : IDisposable
         {
             string dir = Path.Combine(HeroPaths.EventsDir, incidentId);
             Directory.CreateDirectory(dir);
+
+            // Before a single byte is written into it. What goes in here is the target's full
+            // command line and process ancestry, which is the most sensitive thing HERO records,
+            // and the directory would otherwise inherit the state root's read grant to Users.
+            HeroPaths.ProtectIncidentDirectory(dir);
             string file = Path.Combine(dir, $"snapshot-{trigger}-{DateTime.UtcNow:HHmmssfff}.json");
 
             var record = new ForensicRecord

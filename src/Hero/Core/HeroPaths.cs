@@ -390,6 +390,20 @@ internal static class HeroPaths
             }
         }
         catch { /* the vault may not exist yet on a fresh install */ }
+
+        // Incident snapshots recorded before this sweep existed. New ones are protected as they are
+        // created; these are the ones already on disk, and they hold the same captured command
+        // lines. Existing installs get the fix on the next lockdown rather than only new machines.
+        try
+        {
+            string events = Path.Combine(target, "events");
+            if (Directory.Exists(events))
+            {
+                foreach (var incident in Directory.GetDirectories(events, "inc-*"))
+                    ProtectIncidentDirectory(incident);
+            }
+        }
+        catch { /* no incidents yet on a fresh install */ }
     }
 
     /// <summary>Extension the quarantine vault gives a neutralised payload.</summary>
@@ -572,6 +586,85 @@ internal static class HeroPaths
         {
             // Needs ownership or elevation. Both callers have it; failure leaves the file merely
             // as protected as the directory, which is the pre-existing behaviour.
+        }
+    }
+
+    /// <summary>
+    /// Closes one incident directory to everyone but SYSTEM and Administrators.
+    ///
+    /// A forensic snapshot records the incident target's FULL COMMAND LINE, its process tree and
+    /// its ancestry. On a developer machine command lines routinely carry tokens, connection
+    /// strings and passwords — HERO's own behaviour doc makes exactly that argument, which is why
+    /// it captures them. The snapshots then inherited the state root's <c>Users : ReadAndExecute</c>
+    /// grant, so on a shared machine EVERY local account could read every other account's captured
+    /// command lines, remote peers and profile paths. Measured on this machine before this change:
+    /// every <c>events\inc-*</c> directory carried that inherited ACE.
+    ///
+    /// The root's read grant is deliberate and stays — a person should be able to read their own
+    /// evidence. It is the wrong grant for a directory whose contents are other people's secrets.
+    ///
+    /// <see cref="EventsDir"/> itself is left alone on purpose. <c>ledger.jsonl</c> and the outcome
+    /// store live directly in it and are read by the unelevated in-process guardian that runs when
+    /// the service is absent; protecting the parent would break that fallback for the sake of the
+    /// children. So the incident directories are protected individually.
+    /// </summary>
+    internal static void ProtectIncidentDirectory(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+
+            var directory = new DirectoryInfo(path);
+            var security = new System.Security.AccessControl.DirectorySecurity();
+
+            // Protected with inheritance dropped: the inherited set is exactly what grants Users
+            // read here, so preserving it would defeat the call.
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+            void Allow(System.Security.Principal.WellKnownSidType who)
+            {
+                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(who, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit |
+                    System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+            }
+
+            Allow(System.Security.Principal.WellKnownSidType.LocalSystemSid);
+            Allow(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid);
+
+            // And whoever is writing this snapshot. In the shipped configuration that is the
+            // service, so this adds nothing to the two above — but when the service is absent the
+            // guardian runs in-process as the signed-in user, and without this it would create the
+            // directory, lock itself out of it, and then silently fail to write the snapshot it
+            // was in the middle of capturing. Measured: the write fails with UnauthorizedAccess.
+            //
+            // It is also the right grant on its own terms. The snapshot describes that user's own
+            // processes; what the inherited ACE got wrong was handing it to every OTHER account.
+            try
+            {
+                using var me = System.Security.Principal.WindowsIdentity.GetCurrent();
+                if (me.User is { } sid)
+                {
+                    security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                        sid,
+                        System.Security.AccessControl.FileSystemRights.FullControl,
+                        System.Security.AccessControl.InheritanceFlags.ContainerInherit |
+                        System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                        System.Security.AccessControl.PropagationFlags.None,
+                        System.Security.AccessControl.AccessControlType.Allow));
+                }
+            }
+            catch { /* the two grants above are the ones that matter */ }
+
+            directory.SetAccessControl(security);
+        }
+        catch
+        {
+            // Needs elevation, which the service has. A failure leaves the directory as protected
+            // as its parent, which is the pre-existing behaviour rather than a regression.
         }
     }
 

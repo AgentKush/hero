@@ -21,10 +21,37 @@ internal static class SetupActions
     /// <summary>Returned by <see cref="RunElevated"/> when the user dismissed the UAC prompt.</summary>
     internal const int ExitDeclined = -1;
 
+    /// <summary>
+    /// Returned by <see cref="Uninstall"/> when it ran to the end but could not remove everything.
+    /// Distinct from 0 precisely because Windows and the setup window both treat 0 as "it is gone".
+    /// </summary>
+    internal const int ExitIncomplete = 6;
+
     internal const string UninstallKey =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HERO";
 
     internal static string LogHint => $"See {Path.Combine(HeroPaths.Root, "install.log")}.";
+
+    /// <summary>
+    /// The unelevated process that raised this elevated child, or 0 when it was not told.
+    ///
+    /// Set from <see cref="App.SetupParentSwitch"/> before any privileged work begins. Setup has to
+    /// clear HERO out of the install directory before it can copy over it, and it does that by
+    /// killing every process named HERO — which included the setup window that launched it and was
+    /// sitting on WaitForExit. The window disappeared the moment the user approved the prompt, and
+    /// the result it existed to display was never shown.
+    ///
+    /// Sparing it is safe in both shapes an install takes. A setup window launched from the
+    /// downloaded folder holds no file in the destination; one launched from the install directory
+    /// makes the install in-place, where nothing is copied over. Neither can block the work, and
+    /// the deferred directory removal waits for every HERO process by name rather than by PID, so
+    /// an uninstall still cleans up after the spared parent exits.
+    /// </summary>
+    internal static int CallerProcessId { get; set; }
+
+    /// <summary>True for a process setup must leave alone: itself, and the window that raised it.</summary>
+    private static bool Spare(int pid) => pid == Environment.ProcessId
+                                          || (CallerProcessId != 0 && pid == CallerProcessId);
 
     internal static string InstallDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HERO");
@@ -63,6 +90,11 @@ internal static class SetupActions
             };
             info.ArgumentList.Add(switchName);
             foreach (var arg in extraArgs) info.ArgumentList.Add(arg);
+
+            // Always, for every elevated child: this process is about to block on WaitForExit, and
+            // the child's first act is to kill every other HERO. Without this it kills the caller.
+            info.ArgumentList.Add(App.SetupParentSwitch);
+            info.ArgumentList.Add(Environment.ProcessId.ToString());
 
             using var process = Process.Start(info);
             if (process is null) return 2;
@@ -108,16 +140,15 @@ internal static class SetupActions
                 StopEverything();
                 Directory.CreateDirectory(destination);
 
-                int copied = 0;
-                foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+                int copied = 0, skipped = 0;
+                foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.TopDirectoryOnly))
                 {
-                    string relative = Path.GetRelativePath(source, file);
-                    string target = Path.Combine(destination, relative);
-                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                    CopyWithRetry(file, target);
+                    if (!IsProgramFile(file)) { skipped++; continue; }
+                    CopyWithRetry(file, Path.Combine(destination, Path.GetFileName(file)));
                     copied++;
                 }
-                Log($"copied {copied} files to {destination}");
+                Log($"copied {copied} files to {destination}" +
+                    (skipped > 0 ? $"; left {skipped} unrelated file(s) where they were" : ""));
             }
             else
             {
@@ -164,28 +195,73 @@ internal static class SetupActions
 
     // ---------------------------------------------------------------- uninstall
 
+    /// <summary>
+    /// Removes HERO, and reports whether it actually managed to.
+    ///
+    /// ELEVATION IS RAISED HERE RATHER THAN ASSUMED. Settings &gt; Apps runs QuietUninstallString as
+    /// the signed-in user, and HERO ships asInvoker, so nothing on that path arrives elevated.
+    /// Unelevated, every step below fails on access — the service delete, the HKLM key, the
+    /// all-users shortcuts, the Program Files removal — and this method used to catch each failure,
+    /// log it, and return 0 regardless. Windows took that as success, removed its Apps entry, and
+    /// told the user HERO was gone while a LocalSystem auto-start service kept running with no
+    /// remaining way to remove it.
+    ///
+    /// So: raise the prompt if it is needed, and once elevated, keep going past a failed step but
+    /// COUNT the failures. Tolerance is right — an uninstaller that stops at the first missing piece
+    /// leaves the machine half-removed with no way forward — but tolerance is not the same as
+    /// claiming success, and only the exit code can tell the caller which happened.
+    /// </summary>
     internal static int Uninstall()
     {
-        // Deliberately tolerant. An uninstaller that stops at the first missing piece leaves the
-        // machine half-uninstalled and the user with no way forward, so each step is attempted and
-        // recorded independently.
-        Log("=== uninstall starting ===");
+        if (!Elevation.IsElevated)
+        {
+            Log("not elevated; raising a prompt and re-running the uninstall as administrator");
+            int raised = RunElevated(App.SetupUninstallSwitch);
+            Log(raised == 0 ? "the elevated uninstall reported success"
+                : raised == ExitDeclined ? "the permission prompt was dismissed; nothing was removed"
+                : $"the elevated uninstall returned {raised}");
+            return raised;
+        }
 
-        try { RunSelf(InstallDirectory, "--uninstall-service"); }
-        catch (Exception ex) { Log($"service removal: {ex.Message}"); }
+        Log("=== uninstall starting ===");
+        var failed = new List<string>();
+
+        // The service first, and its exit code is now READ. This call used to discard it, which is
+        // half of why an uninstall that removed nothing still reported success.
+        try
+        {
+            int code = RunSelf(InstallDirectory, "--uninstall-service");
+
+            // Exit 4 is "there is no HERO.exe there to run", which happens after a partial install
+            // or when the directory was deleted by hand. The service may still be registered, so
+            // fall back to removing it from this process rather than leaving it behind.
+            if (code == 4)
+            {
+                Log("no installed HERO.exe to run; removing the service directly");
+                if (Service.ServiceControl.Query().Installed)
+                {
+                    Service.ServiceControl.Stop();
+                    Service.ServiceControl.Uninstall();
+                }
+                Log("service removed");
+            }
+            else if (code != 0) { Log($"service removal exited {code}"); failed.Add("the guardian service"); }
+            else Log("service removed");
+        }
+        catch (Exception ex) { Log($"service removal: {ex.Message}"); failed.Add("the guardian service"); }
 
         try
         {
             StartupRegistration.DisableAll();
             Log("startup entries removed");
         }
-        catch (Exception ex) { Log($"startup removal: {ex.Message}"); }
+        catch (Exception ex) { Log($"startup removal: {ex.Message}"); failed.Add("the startup entries"); }
 
         try
         {
             foreach (var p in Process.GetProcessesByName("HERO"))
             {
-                if (p.Id == Environment.ProcessId) continue;
+                if (Spare(p.Id)) continue;
                 try { p.Kill(); p.WaitForExit(4000); } catch { }
             }
         }
@@ -200,7 +276,7 @@ internal static class SetupActions
             {
                 if (File.Exists(link)) { File.Delete(link); Log($"{label} shortcut removed"); }
             }
-            catch (Exception ex) { Log($"{label} shortcut removal: {ex.Message}"); }
+            catch (Exception ex) { Log($"{label} shortcut removal: {ex.Message}"); failed.Add($"the {label} shortcut"); }
         }
 
         try
@@ -208,17 +284,27 @@ internal static class SetupActions
             Registry.LocalMachine.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false);
             Log("uninstall entry removed");
         }
-        catch (Exception ex) { Log($"uninstall entry: {ex.Message}"); }
+        catch (Exception ex) { Log($"uninstall entry: {ex.Message}"); failed.Add("the Settings > Apps entry"); }
 
         // The program files go last, and this process is running from them. Deleting the directory
         // a running executable lives in fails on the executable itself, so the removal is handed to
-        // a detached cmd that waits for this process to exit first.
+        // a detached cmd that waits for every HERO process to exit first.
         try
         {
-            ScheduleDirectoryRemoval(InstallDirectory);
-            Log($"scheduled removal of {InstallDirectory}");
+            if (Directory.Exists(InstallDirectory))
+            {
+                ScheduleDirectoryRemoval(InstallDirectory);
+                Log($"scheduled removal of {InstallDirectory}");
+            }
+            else Log("no install directory to remove");
         }
-        catch (Exception ex) { Log($"program files removal: {ex.Message}"); }
+        catch (Exception ex) { Log($"program files removal: {ex.Message}"); failed.Add("the program files"); }
+
+        if (failed.Count > 0)
+        {
+            Log($"=== uninstall INCOMPLETE: could not remove {string.Join(", ", failed)} ===");
+            return ExitIncomplete;
+        }
 
         Log("=== uninstall done ===");
         return 0;
@@ -277,11 +363,16 @@ internal static class SetupActions
             ? $"if not exist \"{Path.Combine(target, UninstallMarker)}\" goto done"
             : "rem unique directory; no guard needed";
 
+        // Waits for EVERY HERO process, not just this one. When the uninstall is reached through
+        // Settings > Apps it arrives unelevated and relaunches itself elevated, so there are two
+        // HERO processes running from the install directory: this elevated child, and the
+        // unelevated parent still blocked on WaitForExit. Watching only this PID meant the rmdir
+        // fired while the parent still held HERO.exe mapped, and silently left the directory behind.
         File.WriteAllText(script,
             "@echo off\r\n" +
             "setlocal\r\n" +
             $"for /l %%i in (1,1,150) do (\r\n" +
-            $"  tasklist /fi \"PID eq {Environment.ProcessId}\" 2>nul | find \"{Environment.ProcessId}\" >nul || goto gone\r\n" +
+            "  tasklist /fi \"IMAGENAME eq HERO.exe\" 2>nul | find /i \"HERO.exe\" >nul || goto gone\r\n" +
             "  ping -n 2 127.0.0.1 >nul\r\n" +
             ")\r\n" +
             ":gone\r\n" +
@@ -369,7 +460,7 @@ internal static class SetupActions
         {
             foreach (var process in Process.GetProcessesByName("HERO"))
             {
-                if (process.Id == Environment.ProcessId) continue;
+                if (Spare(process.Id)) continue;
                 try
                 {
                     process.CloseMainWindow();
@@ -382,6 +473,46 @@ internal static class SetupActions
 
         // The handles are released a moment after the processes go.
         Thread.Sleep(500);
+    }
+
+    /// <summary>
+    /// Whether one file next to HERO.exe is part of HERO and should be installed with it.
+    ///
+    /// SETUP USED TO COPY THE ENTIRE DIRECTORY TREE IT WAS LAUNCHED FROM, recursively. HERO is
+    /// handed out as a zip, and people unzip into the folder they are already in — so a tester who
+    /// unzipped into Downloads and ran the installer had the whole of Downloads copied into
+    /// %ProgramFiles%\HERO. That is bad on its own, and worse afterwards: the service re-hashes
+    /// everything in the install directory every five minutes, on a loop whose comment reads
+    /// "Cheap: seven files, ~27 MB".
+    ///
+    /// Two rules, and they hold for both shapes HERO ships in. TOP DIRECTORY ONLY, because a .NET
+    /// publish output is flat — subdirectories belong to whatever else was in the folder, never to
+    /// HERO. And a NAME TEST rather than an extension free-for-all: HERO's own files by prefix, and
+    /// the managed and native assemblies that a self-contained build needs, which are the ~250 DLLs
+    /// beside it. Nothing else travels: not the "Install HERO.cmd" and "READ ME FIRST.txt" that ship
+    /// in the test zip, not another installer, not a document.
+    ///
+    /// The list is deliberately narrow. A file HERO genuinely needs and does not match here would
+    /// fail loudly at start-up, which is recoverable; copying a stranger's files into Program Files
+    /// is not.
+    /// </summary>
+    private static bool IsProgramFile(string path)
+    {
+        string name = Path.GetFileName(path);
+        string extension = Path.GetExtension(name);
+
+        // Any .dll: the ~250 managed and native assemblies a self-contained publish lays down
+        // beside the executable, and the two that a framework-dependent one does.
+        if (extension.Equals(".dll", StringComparison.OrdinalIgnoreCase)) return true;
+
+        // HERO's own remaining files — but the NAME AND THE EXTENSION both have to agree. Matching
+        // on the "HERO." prefix alone let hero.gif through when this was tested against a real
+        // folder, and would equally have taken hero.zip or hero-notes.json along for the ride.
+        if (!name.StartsWith("HERO.", StringComparison.OrdinalIgnoreCase)) return false;
+
+        return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)     // HERO.exe
+            || extension.Equals(".pdb", StringComparison.OrdinalIgnoreCase)     // symbols, for a readable stack trace
+            || extension.Equals(".json", StringComparison.OrdinalIgnoreCase);   // deps + runtimeconfig
     }
 
     /// <summary>

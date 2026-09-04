@@ -317,6 +317,22 @@ internal sealed class SetupWindow : Window
             return;
         }
 
+        // Distinct from a plain failure: the uninstall ran to the end and removed some of HERO but
+        // not all of it. Saying "failed" would be wrong — things were removed — and saying nothing
+        // would leave a service registered behind a success message, which is the whole reason this
+        // exit code exists.
+        if (exit == SetupActions.ExitIncomplete)
+        {
+            _headline.Text = "HERO was only partly removed";
+            _detail.Text =
+                "Some of HERO could not be removed, so parts of it are still on this machine. The " +
+                "log lists exactly which steps failed and why.";
+            _status.Foreground = Brush("SevHigh");
+            _status.Text = SetupActions.LogHint;
+            Describe();
+            return;
+        }
+
         if (exit != 0)
         {
             _status.Foreground = Brush("SevHigh");
@@ -351,8 +367,11 @@ internal sealed class SetupWindow : Window
         {
             _headline.Text = "HERO has been removed";
             _detail.Text =
-                "The service is unregistered and the program files are gone. What HERO recorded is " +
-                $"still in {HeroPaths.Root} if you want it; delete that folder to remove every trace.";
+                "The service is unregistered, and the program files are deleted as soon as this " +
+                "window closes. What HERO recorded is still in " +
+                $"{HeroPaths.Root}, and its logs are in {HeroPaths.UserLogDir} — both are kept so a " +
+                "reinstall picks up where it left off. Delete those two folders by hand if you " +
+                "want nothing left; the first one needs administrator rights.";
             _status.Text = "";
             _buttons.Children.Clear();
             Add("Close", ButtonTone.Primary, Close);

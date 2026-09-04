@@ -50,6 +50,16 @@ public partial class App : Application
     internal const string DesktopShortcutSwitch = "--desktop-shortcut";
     internal const string NoStartMenuShortcutSwitch = "--no-start-menu-shortcut";
 
+    /// <summary>
+    /// PID of the unelevated process that raised the elevated setup child, followed by the number.
+    ///
+    /// Setup clears HERO out of the install directory by killing every process named HERO — which
+    /// includes the setup window that launched it and is blocked waiting for its exit code. The
+    /// window died mid-install, so the user saw it vanish after the consent prompt and never learned
+    /// whether anything worked. The child is told which process not to kill.
+    /// </summary>
+    internal const string SetupParentSwitch = "--setup-parent";
+
     private EventWaitHandle? _showRequest;
     private CancellationTokenSource? _showListener;
 
@@ -93,6 +103,17 @@ public partial class App : Application
     {
         bool Has(string flag) => args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
 
+        // Read once for both setup arms. 0 means "nobody said", which spares nothing and restores
+        // the old behaviour rather than guessing at a PID.
+        int SetupParent()
+        {
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i].Equals(SetupParentSwitch, StringComparison.OrdinalIgnoreCase)
+                    && int.TryParse(args[i + 1], out int pid))
+                    return pid;
+            return 0;
+        }
+
         if (Has(Service.ServiceControl.ServiceSwitch))
         {
             // Blocks for the lifetime of the service.
@@ -119,6 +140,7 @@ public partial class App : Application
             // launched, so the choices arrive as switches. Expressed as opt-OUT for the Start menu
             // and opt-IN for the Desktop, which matches both the defaults and what a command line
             // with neither switch should do.
+            Core.SetupActions.CallerProcessId = SetupParent();
             Environment.ExitCode = Core.SetupActions.Install(
                 startMenuShortcut: !Has(NoStartMenuShortcutSwitch),
                 desktopShortcut: Has(DesktopShortcutSwitch));
@@ -128,6 +150,7 @@ public partial class App : Application
 
         if (Has(SetupUninstallSwitch))
         {
+            Core.SetupActions.CallerProcessId = SetupParent();
             Environment.ExitCode = Core.SetupActions.Uninstall();
             Shutdown();
             return true;

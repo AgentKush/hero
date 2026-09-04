@@ -29,8 +29,15 @@ internal static class SetupActions
     internal static string InstallDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "HERO");
 
+    // Both are ALL-USERS locations, matching an all-users install under %ProgramFiles%. The
+    // per-user folders would be wrong twice over: the elevated child may not be the signed-in
+    // user, so its %USERPROFILE% is not necessarily theirs, and a machine-wide install that only
+    // one account can launch is a support call waiting to happen.
     private static string StartMenuShortcut => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "HERO.lnk");
+
+    private static string DesktopShortcut => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "HERO.lnk");
 
     // ---------------------------------------------------------------- elevation
 
@@ -41,7 +48,7 @@ internal static class SetupActions
     /// prompt arrives as a Win32Exception rather than a non-zero exit — distinguishing "the user
     /// said no" from "it failed" matters, because they need completely different messages.
     /// </summary>
-    internal static int RunElevated(string switchName)
+    internal static int RunElevated(string switchName, params string[] extraArgs)
     {
         try
         {
@@ -55,6 +62,7 @@ internal static class SetupActions
                 WorkingDirectory = Path.GetDirectoryName(exe) ?? "",
             };
             info.ArgumentList.Add(switchName);
+            foreach (var arg in extraArgs) info.ArgumentList.Add(arg);
 
             using var process = Process.Start(info);
             if (process is null) return 2;
@@ -71,7 +79,11 @@ internal static class SetupActions
 
     // ---------------------------------------------------------------- install
 
-    internal static int Install()
+    /// <summary>
+    /// Installs HERO. Runs in the ELEVATED child, so the shortcut choices have to arrive as
+    /// arguments — the tick boxes live in a window belonging to a different, unelevated process.
+    /// </summary>
+    internal static int Install(bool startMenuShortcut = true, bool desktopShortcut = false)
     {
         try
         {
@@ -120,7 +132,7 @@ internal static class SetupActions
             if (code != 0) { Log($"service registration failed with exit {code}"); return code; }
 
             WriteUninstallEntry(destination);
-            WriteStartMenuShortcut(destination);
+            ApplyShortcuts(destination, startMenuShortcut, desktopShortcut);
 
             Log("=== install done ===");
             return 0;
@@ -179,12 +191,17 @@ internal static class SetupActions
         }
         catch { }
 
-        try
+        // Both, unconditionally: uninstall does not know which were asked for at install time, and
+        // leaving a Desktop icon that launches a deleted binary is the most visible way to look
+        // half-removed.
+        foreach (var (link, label) in new[] { (StartMenuShortcut, "start menu"), (DesktopShortcut, "desktop") })
         {
-            if (File.Exists(StartMenuShortcut)) File.Delete(StartMenuShortcut);
-            Log("start menu shortcut removed");
+            try
+            {
+                if (File.Exists(link)) { File.Delete(link); Log($"{label} shortcut removed"); }
+            }
+            catch (Exception ex) { Log($"{label} shortcut removal: {ex.Message}"); }
         }
-        catch (Exception ex) { Log($"shortcut removal: {ex.Message}"); }
 
         try
         {
@@ -442,20 +459,51 @@ internal static class SetupActions
     }
 
     /// <summary>
-    /// Writes a Start menu shortcut via a throwaway WSH script.
+    /// Creates or removes the Start menu and Desktop shortcuts to match what was asked for.
+    ///
+    /// REMOVAL IS PART OF THE JOB, not an afterthought. Reinstalling with a box unticked has to
+    /// take the shortcut away, or the choice is one-way and the second install silently disagrees
+    /// with what the window says it did.
+    /// </summary>
+    private static void ApplyShortcuts(string directory, bool startMenu, bool desktop)
+    {
+        Apply(StartMenuShortcut, startMenu, "start menu");
+        Apply(DesktopShortcut, desktop, "desktop");
+
+        void Apply(string link, bool wanted, string label)
+        {
+            if (!wanted)
+            {
+                try
+                {
+                    if (File.Exists(link)) { File.Delete(link); Log($"{label} shortcut removed"); }
+                }
+                catch (Exception ex) { Log($"{label} shortcut could not be removed: {ex.Message}"); }
+                return;
+            }
+
+            WriteShortcut(directory, link, label);
+        }
+    }
+
+    /// <summary>
+    /// Writes one shortcut via a throwaway WSH script.
     ///
     /// A .lnk is a COM-authored binary format, and the interop assembly for IShellLink is not in
     /// the shared framework — pulling in a package for one shortcut would break the project's
     /// zero-dependency rule for very little. wscript is present on every Windows install.
     /// </summary>
-    private static void WriteStartMenuShortcut(string directory)
+    private static void WriteShortcut(string directory, string link, string label)
     {
-        string script = Path.Combine(Path.GetTempPath(), $"hero-shortcut-{Environment.ProcessId}.vbs");
+        string script = Path.Combine(Path.GetTempPath(),
+            $"hero-shortcut-{label.Replace(' ', '-')}-{Environment.ProcessId}.vbs");
         try
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(link) ?? "");
+
             File.WriteAllText(script,
                 "Set s = CreateObject(\"WScript.Shell\")\r\n" +
-                $"Set l = s.CreateShortcut(\"{StartMenuShortcut}\")\r\n" +
+                $"Set l = s.CreateShortcut(\"{link}\")\r\n" +
                 $"l.TargetPath = \"{Path.Combine(directory, "HERO.exe")}\"\r\n" +
                 $"l.WorkingDirectory = \"{directory}\"\r\n" +
                 $"l.IconLocation = \"{Path.Combine(directory, "HERO.exe")}\"\r\n" +
@@ -469,9 +517,9 @@ internal static class SetupActions
                 CreateNoWindow = true,
             });
             process?.WaitForExit(15_000);
-            Log(File.Exists(StartMenuShortcut) ? "start menu shortcut written" : "start menu shortcut not created");
+            Log(File.Exists(link) ? $"{label} shortcut written" : $"{label} shortcut not created");
         }
-        catch (Exception ex) { Log($"shortcut: {ex.Message}"); }
+        catch (Exception ex) { Log($"{label} shortcut: {ex.Message}"); }
         finally { try { File.Delete(script); } catch { } }
     }
 

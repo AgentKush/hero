@@ -45,6 +45,11 @@ public partial class App : Application
     /// <summary>The elevated half of a removal. Also the QuietUninstallString in Settings > Apps.</summary>
     internal const string SetupUninstallSwitch = "--setup-uninstall";
 
+    /// <summary>Shortcut choices, carried to the elevated install child. Both accompany
+    /// <see cref="SetupInstallSwitch"/> and mean nothing on their own.</summary>
+    internal const string DesktopShortcutSwitch = "--desktop-shortcut";
+    internal const string NoStartMenuShortcutSwitch = "--no-start-menu-shortcut";
+
     private EventWaitHandle? _showRequest;
     private CancellationTokenSource? _showListener;
 
@@ -110,7 +115,13 @@ public partial class App : Application
         // and a thing worth clicking.
         if (Has(SetupInstallSwitch))
         {
-            Environment.ExitCode = Core.SetupActions.Install();
+            // The tick boxes are in the unelevated setup window; this is the elevated child it
+            // launched, so the choices arrive as switches. Expressed as opt-OUT for the Start menu
+            // and opt-IN for the Desktop, which matches both the defaults and what a command line
+            // with neither switch should do.
+            Environment.ExitCode = Core.SetupActions.Install(
+                startMenuShortcut: !Has(NoStartMenuShortcutSwitch),
+                desktopShortcut: Has(DesktopShortcutSwitch));
             Shutdown();
             return true;
         }

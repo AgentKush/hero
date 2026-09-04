@@ -28,6 +28,11 @@ internal sealed class SetupWindow : Window
     private readonly TextBlock _headline = new();
     private readonly TextBlock _detail = new();
     private readonly TextBlock _status = new();
+
+    /// <summary>Shortcut tick boxes. Rebuilt by <see cref="Describe"/>, so never null in use.</summary>
+    private readonly StackPanel _options = new();
+    private CheckBox _startMenuShortcut = new();
+    private CheckBox _desktopShortcut = new();
     private readonly FluidProgress _progress = new();
     private readonly StackPanel _buttons = new() { Orientation = Orientation.Horizontal };
 
@@ -72,6 +77,9 @@ internal sealed class SetupWindow : Window
         _detail.Foreground = Brush("TextSecondary");
         _detail.TextWrapping = TextWrapping.Wrap;
         body.Children.Add(_detail);
+
+        _options.Margin = new Thickness(0, 18, 0, 0);
+        body.Children.Add(_options);
 
         _progress.Height = 18;
         _progress.Margin = new Thickness(0, 20, 0, 0);
@@ -166,6 +174,14 @@ internal sealed class SetupWindow : Window
     private static bool IsInstalled =>
         File.Exists(Path.Combine(InstallDirectory, "HERO.exe"));
 
+    // Read from disk rather than remembered, so the boxes show what is actually there. Both are
+    // all-users locations, matching where SetupActions writes them.
+    private static bool StartMenuShortcutExists => File.Exists(Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "HERO.lnk"));
+
+    private static bool DesktopShortcutExists => File.Exists(Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "HERO.lnk"));
+
     /// <summary>True when THIS executable is the installed copy rather than a downloaded one.</summary>
     private static bool RunningFromInstall
     {
@@ -183,11 +199,49 @@ internal sealed class SetupWindow : Window
         }
     }
 
+    /// <summary>
+    /// The shortcut options, as arguments for the elevated install child.
+    ///
+    /// Read at click time rather than stored, so the boxes are the single source of truth. Phrased
+    /// as opt-out for the Start menu and opt-in for the Desktop, so a bare
+    /// <c>--setup-install</c> from a command line still does the conventional thing.
+    /// </summary>
+    private string[] ShortcutArgs()
+    {
+        var args = new List<string>(2);
+        if (_startMenuShortcut.IsChecked != true) args.Add(App.NoStartMenuShortcutSwitch);
+        if (_desktopShortcut.IsChecked == true) args.Add(App.DesktopShortcutSwitch);
+        return args.ToArray();
+    }
+
+    private CheckBox Option(string text, bool chequed)
+    {
+        var box = new CheckBox
+        {
+            Content = text,
+            IsChecked = chequed,
+            Foreground = Brush("TextSecondary"),
+            FontSize = Fs("FsBody"),
+            Margin = new Thickness(0, 0, 0, 6),
+            Cursor = System.Windows.Input.Cursors.Hand,
+        };
+        return box;
+    }
+
     private void Describe()
     {
         _buttons.Children.Clear();
+        _options.Children.Clear();
+        _options.Visibility = Visibility.Visible;
         _progress.Visibility = Visibility.Collapsed;
         _status.Text = "";
+
+        // Rebuilt each time so that reopening the panel after an install reflects what is on disk
+        // rather than what was ticked last time.
+        _startMenuShortcut = Option("Start menu shortcut", StartMenuShortcutExists || !IsInstalled);
+        _desktopShortcut = Option("Desktop shortcut", DesktopShortcutExists);
+        _options.Children.Add(_startMenuShortcut);
+        _options.Children.Add(_desktopShortcut);
 
         if (IsInstalled)
         {
@@ -199,7 +253,8 @@ internal sealed class SetupWindow : Window
                 "Reinstalling over the top updates the program files in place and keeps everything " +
                 "HERO has learned about this machine.";
 
-            Add("Reinstall", ButtonTone.Neutral, () => RunAsync(App.SetupInstallSwitch, "Installing"));
+            Add("Reinstall", ButtonTone.Neutral,
+                () => RunAsync(App.SetupInstallSwitch, "Installing", ShortcutArgs()));
             Add("Uninstall", ButtonTone.Destructive, ConfirmUninstall);
             Add("Close", ButtonTone.Neutral, Close);
         }
@@ -213,7 +268,8 @@ internal sealed class SetupWindow : Window
                 "It makes no network requests except an optional reverse DNS lookup you can turn " +
                 "off, keeps everything it records on this machine, and has no account to create.";
 
-            Add("Install", ButtonTone.Primary, () => RunAsync(App.SetupInstallSwitch, "Installing"));
+            Add("Install", ButtonTone.Primary,
+                () => RunAsync(App.SetupInstallSwitch, "Installing", ShortcutArgs()));
             Add("Cancel", ButtonTone.Neutral, Close);
         }
     }
@@ -241,14 +297,15 @@ internal sealed class SetupWindow : Window
 
     // ------------------------------------------------------------------ running the privileged half
 
-    private async void RunAsync(string switchName, string verb)
+    private async void RunAsync(string switchName, string verb, params string[] extraArgs)
     {
         _buttons.Children.Clear();
+        _options.Visibility = Visibility.Collapsed;
         _progress.Visibility = Visibility.Visible;
         _status.Foreground = Brush("TextSecondary");
         _status.Text = $"{verb}… Windows will ask for permission.";
 
-        int exit = await Task.Run(() => SetupActions.RunElevated(switchName));
+        int exit = await Task.Run(() => SetupActions.RunElevated(switchName, extraArgs));
 
         _progress.Visibility = Visibility.Collapsed;
 

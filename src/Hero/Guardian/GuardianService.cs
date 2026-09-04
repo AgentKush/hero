@@ -570,6 +570,29 @@ internal sealed class GuardianService : IAsyncDisposable
     {
         if (Response is null) return;
         Response.DryRun = Settings.Autonomy == AutonomyLevel.Observe;
+
+        // THE LINE ABOVE USED TO BE THE WHOLE METHOD, and that is why HERO never acted. DryRun was
+        // the only thing settings reached; ResponseEngine.AutonomyEnabled was read by the gate and
+        // assigned by nobody, so every verdict that cleared the evidence bar was explained away
+        // with "automatic action is switched off" no matter what the user had chosen. Everything
+        // underneath it — the observation window, the post-crash pause, quiet hours, the caps —
+        // was unreachable, which is also why nothing ever noticed those were unread.
+        //
+        // A closure rather than a value, because AutoActionPermitted is a function of the clock:
+        // the 72-hour window expires, quiet hours start and end, the post-crash pause lifts. None
+        // of those fire a settings change, so a value read here would be stale — and stale in the
+        // permissive direction. It reads Settings on each call rather than capturing it, so a
+        // settings object replaced by the IPC merge is picked up on the next decision.
+        Response.AutonomyPolicy = () =>
+        {
+            bool permitted = Settings.AutoActionPermitted(DateTime.UtcNow, out string why);
+            return (permitted, why);
+        };
+
+        // The two caps the user can actually see. Settings owns the numbers, the breaker enforces
+        // them, and neither had a reader before now.
+        Response.MaxAutoActionsPerHour = Settings.MaxAutoActionsPerHour;
+        Response.MaxAutoActionsPerSweep = Settings.MaxAutoActionsPerSweep;
     }
 
     /// <summary>
@@ -779,6 +802,12 @@ internal sealed class GuardianService : IAsyncDisposable
             QueueVerification(delta.StartedProcesses.Select(p => p.ImagePath));
         }
 
+        // Watched time and connection learning, every poll. Both were stranded in a Baseline
+        // method that nothing called, which is why PeerAssessor could never find a peer familiar
+        // and why ObservedHours stayed at zero however long HERO ran. Cheap and lock-internal, so
+        // it stays on the poll thread rather than being handed to a task that might run late.
+        Baseline.IngestPoll(delta);
+
         Observed?.Invoke(delta);
 
         // Detection runs off the poll thread. Rules are cheap, but scoring touches the baseline
@@ -813,6 +842,11 @@ internal sealed class GuardianService : IAsyncDisposable
             };
 
             var now = DateTime.UtcNow;
+
+            // One tick's worth of newly started processes is one sweep. That is the unit the
+            // per-sweep cap is about: a rule misfiring across a cohort fires them all in the same
+            // batch, so bounding the batch is what bounds the damage.
+            Response?.BeginSweep();
 
             foreach (var process in delta.StartedProcesses)
             {
@@ -949,6 +983,10 @@ internal sealed class GuardianService : IAsyncDisposable
 
             var context = new DetectionContext { Snapshot = snapshot, Delta = null, Verifier = Verifier };
             var now = DateTime.UtcNow;
+
+            // One persistence inventory is one sweep, which is what gives the per-sweep cap a
+            // boundary to count against.
+            Response?.BeginSweep();
 
             // What this sweep actually found. Everything else with a "persist:" key is stale by
             // definition once the sweep finishes — see ReplacePersistenceVerdicts.

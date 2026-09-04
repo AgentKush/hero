@@ -23,11 +23,16 @@ what it can catch. It is what it refuses to do.
   be written, nothing is quarantined. Terminating a process tree is the one genuinely irreversible
   thing HERO can do, and it is bound by everything in the next line.
 - **It never acts on one signal.** Acting on its own initiative requires a hard indicator by
-  default, is capped at five actions an hour and two per sweep, and is switched off entirely for the
-  first 72 hours — long enough that its first impression of a machine running Unreal, Blender and a
-  dozen language toolchains is formed before it is trusted with a kill switch. A protected set of
-  processes, services and paths is consulted before every action and cannot be overridden by any
-  score.
+  default, and is switched off entirely for the first 72 hours — long enough that its first
+  impression of a machine running Unreal, Blender and a dozen language toolchains is formed before
+  it is trusted with a kill switch. Two sets of limits then apply. Yours, from Settings: five
+  actions an hour and two per sweep. And the engine's own, which you cannot widen, because they
+  exist to bound a rule you have not noticed is broken — three actions in ten minutes, eight in
+  twenty-four hours, and an immediate stop if more than two different programs would be actioned
+  inside a minute, since a real incident converges on one program and a bad rule sprays across
+  many. Hitting any of the engine's limits drops HERO into ask-only mode until you re-arm it by
+  hand. A protected set of processes, services and paths is consulted before every action and
+  cannot be overridden by any score.
 - **It says what it cannot see.** Running unelevated it can enumerate every process but not read
   every image path, so the Overview carries a *Needs elevation* tile counting the ones it cannot,
   rather than reporting a blind spot as "clean".

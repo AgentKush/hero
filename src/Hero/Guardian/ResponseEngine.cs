@@ -367,6 +367,39 @@ internal sealed class CircuitBreaker
     internal const int MaxDistinctTargetsPer60Seconds = 2;
     internal static readonly TimeSpan MinPersistenceRemovalInterval = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// The user's rolling-hour cap, from settings. Sits alongside the fixed windows above rather
+    /// than replacing them: those are the engine's own structural limits and are not the user's to
+    /// widen, while this is the number the Settings page shows and the README quotes.
+    ///
+    /// The two encodings disagreed and only one was enforced. Settings persisted
+    /// maxAutoActionsPerHour = 5 and maxAutoActionsPerSweep = 2, merged them across the IPC
+    /// boundary, clamped them defensively against a hostile settings file, and described them in
+    /// the UI — and nothing ever read either one. The README told the user HERO was "capped at
+    /// five actions an hour and two per sweep" while the only limits with teeth were the three
+    /// constants above.
+    /// </summary>
+    internal int MaxPerHour { get; set; } = 5;
+
+    /// <summary>The user's per-sweep cap. Refuses without tripping — see <see cref="BeginSweep"/>.</summary>
+    internal int MaxPerSweep { get; set; } = 2;
+
+    private int _thisSweep;
+
+    /// <summary>
+    /// Starts a new sweep's budget.
+    ///
+    /// Deliberately NOT persisted, unlike the rolling windows. A sweep is a unit of work inside one
+    /// run; a restart ends it by definition, and carrying a partial sweep's count across a restart
+    /// would make the first sweep after a crash stricter than it should be for no stated reason.
+    /// The rolling hour and the 24-hour ceiling are the limits that survive restarts, and they are
+    /// persisted precisely because a crash-restart loop must not reset them.
+    /// </summary>
+    internal void BeginSweep()
+    {
+        lock (_sync) _thisSweep = 0;
+    }
+
     private readonly string _statePath = Path.Combine(HeroPaths.Root, "autonomy.json");
     private readonly object _sync = new();
     private AutonomyState _state = new();
@@ -399,6 +432,27 @@ internal sealed class CircuitBreaker
             }
 
             var now = DateTime.UtcNow;
+
+            // The per-sweep cap refuses; it does not trip. Hitting it means "that is enough for one
+            // pass", not "something is wrong with HERO" — the next sweep starts with a full budget,
+            // and the rolling windows below are what catch a rule that keeps coming back.
+            if (MaxPerSweep >= 0 && _thisSweep >= MaxPerSweep)
+            {
+                refusal = $"HERO has already taken {_thisSweep} automatic action(s) in this sweep, which is its per-sweep limit. " +
+                          "Anything further in this pass waits for you.";
+                return false;
+            }
+
+            // The user's rolling-hour cap. Distinct from the ten-minute window: that one catches a
+            // rule misfiring across a cohort in a burst, this one catches a slow drip that never
+            // fills a ten-minute bucket.
+            int lastHour = _state.Recent.Count(s => now - s.Utc <= TimeSpan.FromHours(1));
+            if (MaxPerHour >= 0 && lastHour >= MaxPerHour)
+            {
+                TripLocked($"{MaxPerHour} automatic actions have already fired in the last hour, which is the limit set in Settings.");
+                refusal = _state.TripReason;
+                return false;
+            }
 
             int last10 = _state.Recent.Count(s => now - s.Utc <= TimeSpan.FromMinutes(10));
             if (last10 >= MaxPer10Minutes)
@@ -445,6 +499,7 @@ internal sealed class CircuitBreaker
 
             _state.Recent.Add(new AutonomyStamp { Utc = now, Rung = rung.ToString(), Target = target });
             _state.TotalAutonomousActions++;
+            _thisSweep++;
             Save();
             refusal = "";
             return true;
@@ -572,8 +627,80 @@ internal sealed class ResponseEngine : IDisposable
     /// </summary>
     internal bool DryRun { get; set; } = true;
 
-    /// <summary>Master switch for acting without asking. Off until the user reviews the shakedown report.</summary>
-    internal bool AutonomyEnabled { get; set; }
+    /// <summary>
+    /// Asked, at the moment of every autonomy decision, whether HERO may act without asking — and
+    /// if not, why not, in words the user will read.
+    ///
+    /// THIS REPLACED A PLAIN BOOL, and the bool is why HERO could not act at all. `AutonomyEnabled`
+    /// was read here and assigned NOWHERE in the product: <c>GuardianService.ApplyAutonomy</c>, the
+    /// single bridge from settings to engine, set <see cref="DryRun"/> and nothing else. So the
+    /// autonomy level the user picked in Settings reached the dry-run flag and stopped, the gate
+    /// below always fell to "automatic action is switched off", and the four safety limits behind
+    /// it — the 72-hour observation window, the post-crash pause, quiet hours and the caps — were
+    /// never consulted because the thing they exist to limit never ran.
+    ///
+    /// A DELEGATE RATHER THAN A FLAG, because the answer changes with the clock and not with the
+    /// settings. The observation window expires, quiet hours begin and end, the post-crash pause
+    /// lifts. A value captured when settings last changed would be stale within the hour, and
+    /// stale in the permissive direction, which is the wrong way for this particular value to be
+    /// wrong.
+    ///
+    /// Null means not configured, and not configured means NO. A response engine with no policy
+    /// attached is one nobody has told what it is allowed to do.
+    /// </summary>
+    internal Func<(bool Permitted, string Reason)>? AutonomyPolicy { get; set; }
+
+    /// <summary>
+    /// The autonomy half of the gate. Fails closed on a null policy and on a throwing one: this
+    /// answers "may HERO terminate something without asking", so the only safe reading of "I could
+    /// not work it out" is no.
+    /// </summary>
+    private bool AutonomyPermitted(out string reason)
+    {
+        if (AutonomyPolicy is null)
+        {
+            reason = "automatic action is not configured.";
+            return false;
+        }
+
+        try
+        {
+            var (permitted, why) = AutonomyPolicy();
+            reason = permitted ? "" : (why.Length > 0 ? why : "automatic action is switched off.");
+            return permitted;
+        }
+        catch
+        {
+            reason = "HERO could not determine whether it is allowed to act, so it did not.";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The user's cap on autonomous actions in a rolling hour. Settings owns the number; the
+    /// breaker enforces it. See <see cref="CircuitBreaker.MaxPerHour"/>.
+    /// </summary>
+    internal int MaxAutoActionsPerHour
+    {
+        get => _breaker.MaxPerHour;
+        set => _breaker.MaxPerHour = value;
+    }
+
+    /// <summary>The user's cap on autonomous actions within a single sweep.</summary>
+    internal int MaxAutoActionsPerSweep
+    {
+        get => _breaker.MaxPerSweep;
+        set => _breaker.MaxPerSweep = value;
+    }
+
+    /// <summary>
+    /// Marks the start of a detection sweep, resetting the per-sweep budget.
+    ///
+    /// Called by the guardian at the top of each sweep. Without a boundary the "per sweep" cap has
+    /// no meaning, which is why it went unenforced while being persisted, merged over IPC and
+    /// advertised in the README.
+    /// </summary>
+    internal void BeginSweep() => _breaker.BeginSweep();
 
     /// <summary>
     /// Autonomous removal of a startup entry. Off, and it stays off on this machine: System
@@ -694,8 +821,8 @@ internal sealed class ResponseEngine : IDisposable
             else if (!meetsBar) { /* gateWhy already names the failing condition */ }
             else if (DryRun)
                 gateWhy = $"Dry run — HERO would have acted on its own here. {BuildGrantExplanation(verdict)}";
-            else if (!AutonomyEnabled)
-                gateWhy = $"HERO would have acted on its own here ({BuildGrantExplanation(verdict)}), but automatic action is switched off.";
+            else if (!AutonomyPermitted(out string denial))
+                gateWhy = $"HERO would have acted on its own here ({BuildGrantExplanation(verdict)}), but {denial}";
             else if (_breaker.Tripped)
                 gateWhy = $"Ask-only mode: {_breaker.TripReason}";
             else

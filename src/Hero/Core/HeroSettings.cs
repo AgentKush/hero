@@ -104,8 +104,18 @@ internal sealed class QuietHours
 /// </summary>
 internal sealed class HeroSettings
 {
-    /// <summary>Bumped when a key changes meaning. Unknown future versions load best-effort.</summary>
-    internal const int CurrentSchemaVersion = 1;
+    /// <summary>
+    /// Bumped when a key changes meaning. Unknown future versions load best-effort.
+    ///
+    /// 2 — autonomy became functional. No key changed shape; what changed is that the settings on
+    /// either side of this line mean different things in practice. Under version 1 the guardian
+    /// could not act at all, whatever the user had chosen, because the autonomy level never
+    /// reached the engine. An existing install therefore carries an observation window that
+    /// expired long ago and a machine HERO has never actually been trusted to act on. Carrying
+    /// that forward would arm a guardian the moment it is upgraded, on evidence gathered while
+    /// nothing was at stake. See <see cref="NoteStart"/>.
+    /// </summary>
+    internal const int CurrentSchemaVersion = 2;
 
     internal const double DefaultUiScale = 1.15;
     private const double MinUiScale = 0.7;
@@ -333,7 +343,10 @@ internal sealed class HeroSettings
             return s;
         }
 
-        s.SchemaVersion = GetInt(root, "schemaVersion", CurrentSchemaVersion);
+        // Absent means LEGACY, not current. A settings file written before the key existed is by
+        // definition older than the key, and defaulting it to CurrentSchemaVersion would quietly
+        // mark every such file as up to date and skip the upgrade handling in NoteStart.
+        s.SchemaVersion = GetInt(root, "schemaVersion", 1);
         s.Autonomy = GetEnum(root, "autonomy", AutonomyLevel.AutoHighConfidence);
         s._uiScale = Math.Clamp(GetDouble(root, "uiScale", DefaultUiScale), MinUiScale, MaxUiScale);
         s.RunAtStartup = GetBool(root, "runAtStartup", false);
@@ -400,6 +413,20 @@ internal sealed class HeroSettings
         if (firstRun && ObservationEndsUtc is null)
             ObservationEndsUtc = nowUtc.AddHours(72);
 
+        // Upgrading from a build where the guardian could not act. Its observation window ran, and
+        // expired, while the gate downstream of it was wired shut — so the window was never the
+        // thing holding HERO back and its expiry proves nothing about whether this machine is
+        // understood. Start it again, once, rather than arming a guardian on the strength of a
+        // period that cost it nothing to sit through.
+        //
+        // Deliberately unconditional on the old value: an install that is mid-window loses nothing
+        // by restarting, and one whose window expired in April is exactly the case this exists for.
+        if (SchemaVersion < 2)
+        {
+            ObservationEndsUtc = nowUtc.AddHours(72);
+            SchemaVersion = CurrentSchemaVersion;
+        }
+
         if (PreviousRunEndedAbnormally)
         {
             var pause = nowUtc.AddHours(1);
@@ -436,7 +463,12 @@ internal sealed class HeroSettings
         {
             var root = ReadDisk() ?? new JsonObject();
 
-            root["schemaVersion"] = CurrentSchemaVersion;
+            // The IN-MEMORY version, not the constant. Writing the constant here would mark the
+            // file current on any save that happened before NoteStart got to look at it — and a
+            // save before startup is not hypothetical, the UI writes uiScale on its own. The
+            // upgrade marker has to survive until the code that handles the upgrade has run and
+            // bumped it deliberately.
+            root["schemaVersion"] = SchemaVersion;
             root["autonomy"] = Autonomy.ToString();
             root["runAtStartup"] = RunAtStartup;
             root["startupMethod"] = this.StartupMethod.ToString();

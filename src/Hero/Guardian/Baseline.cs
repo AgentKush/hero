@@ -936,27 +936,36 @@ internal sealed class Baseline
     // ---------------------------------------------------------------- observation
 
     /// <summary>
-    /// Feeds one poll into the model: newly started processes and their connections.
-    /// This is the single call the guardian service needs to wire up.
+    /// Feeds one poll into the model: watched time, and the peers and ports each program talked to.
+    ///
+    /// THIS REPLACED A METHOD CALLED Ingest whose own summary read "this is the single call the
+    /// guardian service needs to wire up", and which nothing called. What it did was three things:
+    /// accrue watched time, observe every started process, and learn connections. Only the middle
+    /// one was ever reached, because <c>GuardianService.Evaluate</c> had grown its own copy of that
+    /// loop — a stricter copy, which also skips HERO's own PID and takes the signature from the
+    /// verification cache. So processes were learned and the other two were not.
+    ///
+    /// The process loop is deliberately NOT here. Restoring the old method wholesale would have
+    /// observed every started process twice per poll — once from Evaluate, once from here —
+    /// inflating execution counts and dragging rarity down for exactly the programs HERO sees most.
+    /// Evaluate keeps that job because its version is the better one; this keeps the two halves
+    /// that had no other home.
+    ///
+    /// Called from the poll handler rather than from Evaluate, because Evaluate only runs on polls
+    /// where a process actually started. Watched time has to accrue on every poll or it measures
+    /// process churn instead of elapsed observation, and a long-lived program that opens a socket
+    /// without starting anything is precisely the connection worth learning.
     /// </summary>
-    internal void Ingest(SnapshotDelta delta, DetectionContext context)
+    internal void IngestPoll(SnapshotDelta delta)
     {
         var now = delta.Current.TakenUtc;
         Heartbeat(now);
-
-        foreach (var p in delta.StartedProcesses)
-        {
-            if (p.PathUnavailable) continue;
-            if (HeroPaths.IsOwnState(p.ImagePath)) continue;   // never learn from, or about, ourselves
-
-            string? parent = delta.Current.ByPid.TryGetValue(p.ParentPid, out var par) ? par.FileName : null;
-            Observe(p, context.Signature(p.ImagePath), parent, now);
-        }
 
         foreach (var c in delta.NewConnections)
         {
             if (!c.IsExternal) continue;
             if (!delta.Current.ByPid.TryGetValue(c.Pid, out var owner) || owner.PathUnavailable) continue;
+            if (HeroPaths.IsOwnState(owner.ImagePath)) continue;   // never learn from, or about, ourselves
             var e = Find(owner.ImagePath);
             if (e is not null) ObserveConnection(e, c, now);
         }

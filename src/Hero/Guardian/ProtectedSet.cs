@@ -367,28 +367,41 @@ internal sealed class ProtectedSet
 
     internal ProtectedSet()
     {
-        string user = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var seeds = new List<string> { @"D:\My projects" };
 
-        var seeds = new List<string>
+        // SEEDED PER SIGNED-IN USER, not from this process's own identity.
+        //
+        // These were six Path.Combine calls against Environment.GetFolderPath. Inside the
+        // LocalSystem service every one of them resolved under
+        // C:\Windows\system32\config\systemprofile — so the suppressor never matched a real
+        // toolchain, and the user's .cargo, .nuget, npm and VS Code directories had no autonomy
+        // cover at all. This is the mirror image of the classifier bug, and the more dangerous
+        // half: the classifier was scoring those paths too LOW, while the one control that stops
+        // HERO acting on them was aimed at a directory nobody uses.
+        //
+        // Both halves have to move together. Raising the score on real profile paths while the
+        // suppressor for exactly those paths still points at systemprofile is the one combination
+        // that makes this change net-harmful rather than net-useful.
+        foreach (var u in Core.UserHives.Folders())
         {
-            @"D:\My projects",
-            Path.Combine(user, ".nuget"),
-            Path.Combine(user, ".cargo"),
-            Path.Combine(user, ".rustup"),
-            Path.Combine(user, "go"),
-            Path.Combine(roaming, "npm"),
-            Path.Combine(local, "Programs", "Microsoft VS Code"),
+            string user = u.Profile, local = u.LocalAppData, roaming = u.RoamingAppData;
+            if (user.Length == 0) continue;
+
+            seeds.Add(Path.Combine(user, ".nuget"));
+            seeds.Add(Path.Combine(user, ".cargo"));
+            seeds.Add(Path.Combine(user, ".rustup"));
+            seeds.Add(Path.Combine(user, "go"));
+            seeds.Add(Path.Combine(roaming, "npm"));
+            seeds.Add(Path.Combine(local, "Programs", "Microsoft VS Code"));
 
             // The nine unsigned-but-benign binaries measured running on this machine
             // (PLATFORM-FACTS §5) live under these three. They are simultaneously a normal
             // developer software class and a plausible drop location, so they suppress autonomy
             // only — HERO still reports anything it finds here.
-            Path.Combine(local, "uv"),
-            Path.Combine(local, "Microsoft", "WinGet", "Packages"),
-            Path.Combine(roaming, "Claude", "Claude Extensions"),
-        };
+            seeds.Add(Path.Combine(local, "uv"));
+            seeds.Add(Path.Combine(local, "Microsoft", "WinGet", "Packages"));
+            seeds.Add(Path.Combine(roaming, "Claude", "Claude Extensions"));
+        }
 
         lock (_sync)
         {

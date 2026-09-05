@@ -166,6 +166,16 @@ internal sealed class PersistenceLocationRule : IDetectionRule
             case PathClass.Public:
             case PathClass.RecycleBin:
             {
+                // A build tree hosted UNDER one of these wins the Downloads test before it ever
+                // reaches the DevWorkspace test, so it arrives here having silently lost the
+                // Recognised cover it would have had anywhere else in the profile. That matters
+                // only for this arm, which is the highest-weight one in the rule and has no other
+                // escape hatch — 18 at Severity.High for what is somebody's debug output.
+                //
+                // Same shape as the guard VolatileLocationRule already carries: re-test the raw
+                // path rather than trusting a class that a prefix ordering has taken away.
+                if (KnownSoftware.LooksLikeDevelopmentOutput(e.ImagePath)) yield break;
+
                 double weight = identity.Location == PathClass.RecycleBin ? 22 : 18;
                 yield return RuleKit.Emit(Id, "Auto-start points at a temporary folder",
                     $"{e.Name} starts a program from {UnsignedImageRule.Describe(identity.Location)} " +

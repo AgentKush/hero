@@ -142,6 +142,86 @@ internal static class UserHives
             : "";
     }
 
+    // ------------------------------------------------------------------ folder roots
+
+    /// <summary>The profile-relative directories that mean something different for every account.</summary>
+    /// <param name="Profile">Profile root, e.g. C:\Users\alice.</param>
+    /// <param name="LocalAppData">…\AppData\Local.</param>
+    /// <param name="RoamingAppData">…\AppData\Roaming.</param>
+    /// <param name="Temp">…\AppData\Local\Temp.</param>
+    /// <param name="Downloads">The user's Downloads, which is commonly redirected into OneDrive.</param>
+    internal readonly record struct UserFolders(
+        string Profile, string LocalAppData, string RoamingAppData, string Temp, string Downloads);
+
+    private static readonly object FolderGate = new();
+    private static IReadOnlyList<UserFolders>? _folders;
+    private static DateTime _foldersUtc;
+
+    /// <summary>
+    /// Profile-relative roots for every signed-in user, cached briefly.
+    ///
+    /// Cached because path classification is on the hot path — every process start is classified —
+    /// and rebuilding this means a registry walk. Cached only BRIEFLY because people sign in and
+    /// out, and a root set fixed at start-up would classify a newly signed-in user's Downloads as
+    /// an unrecognised location for the rest of the service's life.
+    ///
+    /// Thirty seconds is the compromise: three orders of magnitude cheaper than the per-classify
+    /// cost it replaces, and far shorter than the ten-minute persistence sweep, so no sweep ever
+    /// runs entirely against a stale set.
+    /// </summary>
+    internal static IReadOnlyList<UserFolders> Folders()
+    {
+        lock (FolderGate)
+        {
+            var now = DateTime.UtcNow;
+            if (_folders is { } cached && now - _foldersUtc < TimeSpan.FromSeconds(30))
+                return cached;
+
+            var built = new List<UserFolders>(4);
+            foreach (var user in Loaded())
+            {
+                if (user.ProfilePath.Length == 0) continue;
+                string p = user.ProfilePath.TrimEnd('\\');
+                built.Add(new UserFolders(
+                    Profile: p,
+                    LocalAppData: Path.Combine(p, @"AppData\Local"),
+                    RoamingAppData: Path.Combine(p, @"AppData\Roaming"),
+                    Temp: Path.Combine(p, @"AppData\Local\Temp"),
+                    Downloads: DownloadsOf(user, p)));
+            }
+
+            _folders = built;
+            _foldersUtc = now;
+            return built;
+        }
+    }
+
+    /// <summary>
+    /// One user's Downloads folder, from their own shell-folder registration.
+    ///
+    /// Read rather than assembled because on Windows 11 Downloads is commonly redirected into
+    /// OneDrive, and a hand-built %USERPROFILE%\Downloads would then name a folder nothing is ever
+    /// downloaded into — which for a security tool is the folder that matters most.
+    /// </summary>
+    private static string DownloadsOf(UserHive user, string profile)
+    {
+        const string DownloadsGuid = "{374DE290-123F-4565-9164-39C4925E467B}";
+
+        using (var shell = Open(user, RegistryView.Registry64,
+                   @"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"))
+        {
+            if (shell?.GetValue(DownloadsGuid, null,
+                    RegistryValueOptions.DoNotExpandEnvironmentNames) is string { Length: > 0 } raw)
+            {
+                // Against THIS user's profile, never the environment's — the same trap as
+                // StartupFolder, and the reason both resolve by substitution rather than expansion.
+                return raw.Replace("%USERPROFILE%", profile, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        return Path.Combine(profile, "Downloads");
+    }
+
     private static string ProfilePathOf(string sid)
     {
         try

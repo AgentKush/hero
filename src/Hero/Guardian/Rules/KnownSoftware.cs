@@ -127,12 +127,126 @@ internal static class KnownSoftware
     private static readonly string ProgramFilesDir = Folder(Environment.SpecialFolder.ProgramFiles);
     private static readonly string ProgramFilesX86Dir = Folder(Environment.SpecialFolder.ProgramFilesX86);
     private static readonly string ProgramDataDir = Folder(Environment.SpecialFolder.CommonApplicationData);
-    private static readonly string LocalAppData = Folder(Environment.SpecialFolder.LocalApplicationData);
-    private static readonly string RoamingAppData = Folder(Environment.SpecialFolder.ApplicationData);
-    private static readonly string UserProfile = Folder(Environment.SpecialFolder.UserProfile);
-    private static readonly string TempDir = Ensure(SafeTempPath());
-    private static readonly string DownloadsDir = Ensure(ResolveDownloads());
     private static readonly string PublicDir = Ensure(Environment.GetEnvironmentVariable("PUBLIC") ?? @"C:\Users\Public");
+
+    // --- per-user roots -------------------------------------------------
+    //
+    // THE SIX ROOTS ABOVE ARE MACHINE-WIDE AND MEAN THE SAME THING TO EVERY ACCOUNT. These five do
+    // not, and they used to be resolved the same way: one Environment.GetFolderPath at type-init,
+    // against whatever identity HERO happened to be running as. Once the guardian moved into the
+    // LocalSystem service that became C:\Windows\system32\config\systemprofile and C:\Windows\TEMP,
+    // so C:\Users\finla\Downloads\dropper.exe matched none of them and fell through to
+    // PathClass.Unknown.
+    //
+    // Unknown is not inert. It is user-writable (IsUserWritable includes it deliberately, as the
+    // fail-safe for path shapes the classifier does not know), so the gates still passed — but it
+    // is NOT volatile, and volatility is what the weight tables key on. The measured effect:
+    // proc.volatile-location and the whole of PersistenceLocationRule could never fire on a real
+    // user's Downloads, and an unsigned binary there scored 10/Low instead of 16/Medium.
+    //
+    // A SNAPSHOT RATHER THAN FIELDS, because there is no longer one answer: there is one per
+    // signed-in account, and the set changes as people log in and out. The generation counter is
+    // what lets the classification cache below know its answers have expired.
+    private sealed record Roots(
+        DateTime BuiltUtc, int Generation, string Signature, string[] Temp, string[] Downloads,
+        string[] LocalAppData, string[] RoamingAppData, string[] Profile);
+
+    private static volatile Roots? _roots;
+    private static readonly object RootsGate = new();
+
+    /// <summary>How long a root set is trusted before the signed-in users are looked up again.</summary>
+    private static readonly TimeSpan RootsTtl = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The per-user roots, rebuilt when the set of signed-in users changes.
+    ///
+    /// Deliberately NOT a field initialiser. The machine-wide roots above are captured at type-init
+    /// and other tables depend on that ordering, so a throw here would surface as a
+    /// TypeInitializationException that takes every rule down with it. This is lazy, locked, and
+    /// falls back to the current identity's own folders — which is exactly right for the unelevated
+    /// in-process guardian, and no worse than the old behaviour anywhere else.
+    /// </summary>
+    private static Roots CurrentRoots()
+    {
+        // The hot path: one volatile read and one clock comparison, no lock. Classification runs on
+        // every process start, so the registry walk below must not be anywhere near it.
+        var snapshot = _roots;
+        var now = DateTime.UtcNow;
+        if (snapshot is not null && now - snapshot.BuiltUtc < RootsTtl) return snapshot;
+
+        lock (RootsGate)
+        {
+            snapshot = _roots;
+            if (snapshot is not null && DateTime.UtcNow - snapshot.BuiltUtc < RootsTtl) return snapshot;
+
+            var temp = new List<string>(4);
+            var downloads = new List<string>(4);
+            var local = new List<string>(4);
+            var roaming = new List<string>(4);
+            var profile = new List<string>(4);
+
+            void Add(string? t, string? d, string? l, string? r, string? pr)
+            {
+                // Ensure() per element, never once over the joined set: without the trailing
+                // separator "C:\Users\bob" prefix-matches "C:\Users\bobby\evil.exe", and the
+                // \u0000 sentinel it returns for an empty root is the only thing stopping one
+                // unresolvable folder from classifying the entire disk as UserData.
+                temp.Add(Ensure(t)); downloads.Add(Ensure(d));
+                local.Add(Ensure(l)); roaming.Add(Ensure(r)); profile.Add(Ensure(pr));
+            }
+
+            try
+            {
+                foreach (var u in Core.UserHives.Folders())
+                    Add(u.Temp, u.Downloads, u.LocalAppData, u.RoamingAppData, u.Profile);
+            }
+            catch { /* fall through to the current identity, below */ }
+
+            // Always included as well as the enumerated users, not instead of them. Under the
+            // service these are the systemprofile paths and match nothing real, which costs
+            // nothing; in the in-process guardian they are the only ones that exist.
+            try
+            {
+                Add(SafeTempPath(),
+                    ResolveDownloads(),
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            }
+            catch { }
+
+            // The generation only moves when the ROOTS actually change, not merely because the TTL
+            // lapsed — otherwise the classification cache would be thrown away every thirty seconds
+            // on a machine where nobody has logged in or out, which is every machine most of the
+            // time. A signature over the joined set is the cheapest honest test.
+            string signature = string.Join("|", temp) + "" + string.Join("|", downloads)
+                             + "" + string.Join("|", local) + "" + string.Join("|", roaming)
+                             + "" + string.Join("|", profile);
+
+            int generation = snapshot?.Generation ?? 0;
+            if (snapshot is null || !string.Equals(snapshot.Signature, signature, StringComparison.Ordinal))
+            {
+                generation++;
+
+                // A cached PathClass was computed against the OLD roots. Someone who signs in after
+                // the service started would otherwise be pinned at Unknown for the life of the
+                // process — the exact bug this change exists to fix, reintroduced one layer up.
+                PathClassCache.Clear();
+            }
+
+            _roots = snapshot = new Roots(DateTime.UtcNow, generation, signature,
+                                          temp.ToArray(), downloads.ToArray(),
+                                          local.ToArray(), roaming.ToArray(), profile.ToArray());
+            return snapshot;
+        }
+    }
+
+    private static bool UnderAny(string path, string[] prefixes)
+    {
+        foreach (var prefix in prefixes)
+            if (Under(path, prefix)) return true;
+        return false;
+    }
 
     private static string Folder(Environment.SpecialFolder f)
     {
@@ -161,7 +275,14 @@ internal static class KnownSoftware
         catch { /* fall through to the string-built guess */ }
         finally { if (p != IntPtr.Zero) Marshal.FreeCoTaskMem(p); }
 
-        return UserProfile.Length > 1 ? Path.Combine(UserProfile.TrimEnd('\\'), "Downloads") : "";
+        // Fallback pairs THIS identity's profile with "Downloads". It must stay a pairing: crossing
+        // one user's profile with another's Downloads would invent a path belonging to nobody.
+        try
+        {
+            var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return profile.Length > 1 ? Path.Combine(profile.TrimEnd('\\'), "Downloads") : "";
+        }
+        catch { return ""; }
     }
 
     /// <summary>Terminates a directory with a backslash so prefix tests cannot match a sibling
@@ -614,11 +735,16 @@ internal static class KnownSoftware
         if (p.StartsWith(@"\\", StringComparison.Ordinal)) return PathClass.Network;
         if (p.Contains(@"\$Recycle.Bin\", StringComparison.OrdinalIgnoreCase)) return PathClass.RecycleBin;
 
-        if (Under(p, TempDir) || p.Contains(@"\AppData\Local\Temp\", StringComparison.OrdinalIgnoreCase)
-                              || p.Contains(@"\Windows\Temp\", StringComparison.OrdinalIgnoreCase))
+        // Each class is tested for ALL users before the next class is tested for any. Written the
+        // other way round — user by user — account A's profile test would beat account B's
+        // Downloads test, silently downgrading a volatile 16 to a non-volatile 8.
+        var roots = CurrentRoots();
+
+        if (UnderAny(p, roots.Temp) || p.Contains(@"\AppData\Local\Temp\", StringComparison.OrdinalIgnoreCase)
+                                    || p.Contains(@"\Windows\Temp\", StringComparison.OrdinalIgnoreCase))
             return PathClass.Temp;
 
-        if (Under(p, DownloadsDir)) return PathClass.Downloads;
+        if (UnderAny(p, roots.Downloads)) return PathClass.Downloads;
         if (Under(p, PublicDir)) return PathClass.Public;
 
         if (p.Contains(@"\DriverStore\FileRepository\", StringComparison.OrdinalIgnoreCase))
@@ -648,7 +774,8 @@ internal static class KnownSoftware
         if (LooksLikeDevelopmentOutput(p)) return PathClass.DevWorkspace;
 
         if (Under(p, ProgramDataDir)) return PathClass.ProgramData;
-        if (Under(p, LocalAppData) || Under(p, RoamingAppData) || Under(p, UserProfile)) return PathClass.UserData;
+        if (UnderAny(p, roots.LocalAppData) || UnderAny(p, roots.RoamingAppData) || UnderAny(p, roots.Profile))
+            return PathClass.UserData;
 
         return DriveTypeOf(p) switch
         {

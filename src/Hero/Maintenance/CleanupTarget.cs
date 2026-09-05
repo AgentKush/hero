@@ -82,8 +82,22 @@ internal enum SkipReason { None, InUse, AccessDenied, AlreadyGone, OutsideTarget
 
 /// <summary>One file as seen by the walker. Everything here comes from the directory entry
 /// already in hand, so constructing it costs no extra syscall.</summary>
-internal readonly record struct ScannedFile(string Path, long Length, DateTime LastWriteUtc, FileAttributes Attributes)
+internal readonly record struct ScannedFile(string Path, long Length, DateTime LastWriteUtc, FileAttributes Attributes,
+                                           string DisplayPath = "")
 {
+    /// <summary>
+    /// What to show the user, when that is not the path being deleted.
+    ///
+    /// Exists for the recycle bin and nothing else so far. There the file on disk is
+    /// <c>$RECYCLE.BIN\&lt;sid&gt;\$RABCDEF.txt</c>, which tells a person nothing, while the name they
+    /// need is the path it was deleted from. Every other target deletes the file it shows, so
+    /// DisplayPath is empty and <see cref="Display"/> falls back to Path.
+    /// </summary>
+    internal string Display => DisplayPath.Length > 0 ? DisplayPath : Path;
+
+    /// <summary>The preview renders this. Without it a record struct prints its whole shape.</summary>
+    public override string ToString() => Display;
+
     // Not in the FileAttributes enum, so declared as raw values from winnt.h.
     private const FileAttributes RecallOnOpen = (FileAttributes)0x00040000;
     private const FileAttributes RecallOnDataAccess = (FileAttributes)0x00400000;
@@ -403,10 +417,30 @@ internal sealed class RecycleBinTarget : CleanupTarget
         var m = Measure(ct);
         string binRoot = Path.Combine(VolumeRoot, "$RECYCLE.BIN");
 
+        int recycled = 0;
+
         if (FileWalk.Probe(binRoot) == AccessState.Measured)
         {
             foreach (var entry in RecycleBinIndex.Read(binRoot, maxItems, ct))
-                items.Add(new ScannedFile(entry.OriginalPath, entry.Size, entry.DeletedUtc, FileAttributes.Normal));
+            {
+                recycled++;
+
+                // THE PATH HAS TO BE THE FILE ON DISK. This listed entry.OriginalPath, which is
+                // where the file used to live — C:\Users\<u>\Desktop\thing.txt — and the plan
+                // declares $RECYCLE.BIN as its only root. CleanupExecutor.Validate accepts a file
+                // only when its path starts with a declared root, so every single item was skipped
+                // as OutsideTarget and this target could never delete anything. The original path
+                // is what the user needs to READ, which is what DisplayPath is for.
+                items.Add(new ScannedFile(entry.DataPath, entry.Size, entry.DeletedUtc,
+                                          FileAttributes.Normal, DisplayPath: entry.OriginalPath));
+
+                // One recycled item is two files: the $R payload holding the bytes and the $I
+                // index describing it. Deleting only the payload leaves the bin showing a phantom
+                // entry of zero bytes that the user cannot get rid of, so both go.
+                if (IndexPathFor(entry.DataPath) is { Length: > 0 } index)
+                    items.Add(new ScannedFile(index, 0, entry.DeletedUtc,
+                                              FileAttributes.Normal, DisplayPath: entry.OriginalPath + "  (index)"));
+            }
         }
 
         return new CleanupPlan
@@ -414,7 +448,9 @@ internal sealed class RecycleBinTarget : CleanupTarget
             TargetId = Id,
             Files = items,
             Measurement = m,
-            Truncated = m.Files > items.Count,
+            // Against RECYCLED ITEMS, not against the file list, which now holds two entries per
+            // item. Comparing to items.Count would report every full read as truncated.
+            Truncated = m.Files > recycled,
             Roots = new[] { binRoot },
             PruneEmptyDirectories = false,
             Blockers = CurrentBlockers()
@@ -423,6 +459,26 @@ internal sealed class RecycleBinTarget : CleanupTarget
                     Blocking: false))
                 .ToList(),
         };
+    }
+
+    /// <summary>
+    /// The $I index file that pairs with a $R payload.
+    ///
+    /// The two names differ by exactly those two characters and nothing else — $RABC123.txt is
+    /// described by $IABC123.txt in the same directory — which is the pairing the format is built
+    /// on. Returns empty rather than guessing when the name is not that shape.
+    /// </summary>
+    private static string IndexPathFor(string dataPath)
+    {
+        try
+        {
+            string name = Path.GetFileName(dataPath);
+            if (!name.StartsWith("$R", StringComparison.OrdinalIgnoreCase)) return "";
+
+            string dir = Path.GetDirectoryName(dataPath) ?? "";
+            return dir.Length == 0 ? "" : Path.Combine(dir, "$I" + name[2..]);
+        }
+        catch { return ""; }
     }
 }
 

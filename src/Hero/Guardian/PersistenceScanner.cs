@@ -665,11 +665,67 @@ internal static class PersistenceScanner
                     Name = taskName,
                     Target = toRun,
                     ImagePath = ExtractExecutable(toRun),
-                    Enabled = !status.Equals("Disabled", StringComparison.OrdinalIgnoreCase),
+
+                    // The task's own definition first, and the English word only as a fallback.
+                    // schtasks localises its VALUES, not just its headers, so on a German or French
+                    // Windows this column reads "Deaktiviert" or "Désactivé" and the comparison
+                    // below never matches — every disabled task reports as enabled. That is not
+                    // cosmetic: PersistenceKit.ForEnabledState drops disabled entries before any
+                    // rule sees them, so on a non-English machine every dormant task in the
+                    // inventory was fed to the persistence rules as though it were live.
+                    Enabled = EnabledFromDefinition(taskName)
+                              ?? !status.Equals("Disabled", StringComparison.OrdinalIgnoreCase),
                 });
             }
         }
         catch (Exception ex) { failures.Add($"Scheduled tasks ({ex.GetType().Name})"); }
+    }
+
+    /// <summary>
+    /// Whether a scheduled task is enabled, read from its own definition rather than from
+    /// schtasks' localised output. Null when the definition cannot be read.
+    ///
+    /// Every task has an XML definition under %WINDIR%\System32\Tasks mirroring its name as a
+    /// directory path, and the schema is invariant: &lt;Enabled&gt; is the same element on every
+    /// Windows in every language. That is the whole reason to prefer it over a column of prose.
+    ///
+    /// SETTINGS/ENABLED SPECIFICALLY, not the first Enabled element in the file. Each trigger
+    /// carries its own &lt;Enabled&gt;, and they appear earlier in the document — a substring or a
+    /// naive regex would answer with a trigger's state and be wrong for any task whose first
+    /// trigger is switched off.
+    ///
+    /// Returns null rather than a guess on any failure, including the access denials that are
+    /// ordinary here: some task files are readable only by SYSTEM, and the caller then falls back
+    /// to the text it already had.
+    /// </summary>
+    private static bool? EnabledFromDefinition(string taskName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(taskName)) return null;
+
+            // A task name is a virtual path — \Microsoft\Windows\Foo\Bar — and the file lives at
+            // the same relative position under the Tasks directory.
+            string relative = taskName.Trim().TrimStart('\\', '/');
+            if (relative.Length == 0 || relative.Contains("..", StringComparison.Ordinal)) return null;
+
+            string path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System), "Tasks", relative);
+
+            if (!File.Exists(path)) return null;
+
+            var document = System.Xml.Linq.XDocument.Load(path);
+            var ns = document.Root?.Name.Namespace;
+            if (ns is null) return null;
+
+            var value = document.Root?.Element(ns + "Settings")?.Element(ns + "Enabled")?.Value;
+
+            // Absent means enabled: the element is optional and its documented default is true.
+            if (string.IsNullOrWhiteSpace(value)) return true;
+
+            return !value.Trim().Equals("false", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return null; }
     }
 
     /// <summary>Minimal RFC4180 field splitter — schtasks quotes fields containing commas.</summary>

@@ -77,8 +77,23 @@ consulted before every action and cannot be overridden by any score.
 image paths, and the Security event log is closed to it. It says so in the UI rather than reporting
 a blind spot as "clean".
 
-**Cheap.** Measured tray-resident cost: **1.6% of one core (0.067% of 24 threads) and 105 MB**,
-while watching 350+ processes and 150 sockets every second.
+**Cheap, and measured as two processes because that is what it is.** HERO runs a LocalSystem
+service that does the watching and a tray app that shows it to you, so the cost is the sum:
+
+| | CPU | Private memory |
+|---|---|---|
+| Guardian service | 4.2% of one core (0.17% of 24 threads) | 65 MB |
+| Dashboard, tray-resident | 1.2% of one core (0.05% of 24 threads) | 262 MB |
+
+Measured on this machine over eight minutes of ordinary use, from Windows' own performance
+counters, against a Release build watching ~340 processes and ~150 sockets. The dashboard's memory
+is the number the author is least happy with and is being looked at; it grows over a session, which
+a window that has never been opened has no business doing.
+
+An earlier version of this line claimed 1.6% and 105 MB. That was true, and was measured, when
+HERO was a single process — moving the guardian into a service made it two, and the figure was
+never re-taken. It is recorded here rather than quietly corrected because a number nobody re-checks
+after an architectural change is exactly the kind of claim this file is supposed to be better than.
 
 ## Building
 

@@ -343,7 +343,46 @@ internal sealed record ObservationResult(BaselineEntity Entity, ChangeKind Chang
 /// </summary>
 internal static class PathModel
 {
-    private static readonly (string Prefix, string Token)[] Prefixes = BuildPrefixes();
+    private static volatile (string Prefix, string Token)[] _prefixes = BuildPrefixes();
+    private static readonly object PrefixGate = new();
+    private static DateTime _prefixesUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// Prefix table, refreshed as people sign in — and APPEND-ONLY, which is the whole design.
+    ///
+    /// A prefix decides how a path tokenises, and the tokenised path is hashed into the entity key.
+    /// Adding a prefix is therefore safe: the only paths it can affect belong to a user who has
+    /// just signed in and who has no entities yet. REMOVING one is not, because every entity
+    /// already keyed under that token would silently stop matching its own path on the next
+    /// observation — the store would keep the record and never look at it again. So a prefix seen
+    /// once is kept for the life of the process, even after that user logs off.
+    /// </summary>
+    private static (string Prefix, string Token)[] Prefixes
+    {
+        get
+        {
+            var current = _prefixes;
+            if (DateTime.UtcNow - _prefixesUtc < TimeSpan.FromSeconds(30)) return current;
+
+            lock (PrefixGate)
+            {
+                if (DateTime.UtcNow - _prefixesUtc < TimeSpan.FromSeconds(30)) return _prefixes;
+
+                var merged = new List<(string Prefix, string Token)>(_prefixes);
+                var seen = new HashSet<string>(_prefixes.Select(p => p.Prefix), StringComparer.Ordinal);
+
+                foreach (var candidate in BuildPrefixes())
+                    if (seen.Add(candidate.Item1)) merged.Add(candidate);
+
+                // Longest first, so %TEMP% still wins over the %LOCALAPPDATA% it lives inside —
+                // re-sorted after the merge because a newly added user's root can be longer than
+                // anything already in the table.
+                _prefixes = merged.OrderByDescending(t => t.Prefix.Length).ToArray();
+                _prefixesUtc = DateTime.UtcNow;
+                return _prefixes;
+            }
+        }
+    }
 
     private static readonly Regex GuidSegment = new(
         @"^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$",
@@ -370,7 +409,33 @@ internal static class PathModel
                 list.Add((path.TrimEnd('\\').ToLowerInvariant(), token.ToLowerInvariant()));
         }
 
+        // THE CURRENT IDENTITY'S ROOTS ARE ADDED AS WELL AS, NEVER INSTEAD OF, THE USERS' OWN.
+        // Under the LocalSystem service Path.GetTempPath() is C:\Windows\Temp, and it has to keep
+        // mapping to %TEMP% — trust 0.10. Replace it with the per-user temps and C:\Windows\Temp
+        // stops matching %TEMP%, falls through to %WINDIR%, and is scored 0.85: a drop location
+        // would gain trust from a change meant to take it away.
         Add(Path.GetTempPath(), "%TEMP%");
+
+        // The two MACHINE temp directories, named explicitly and unconditionally.
+        //
+        // This is what makes tokenisation independent of who is running. Path.GetTempPath() answers
+        // differently per identity — C:\Windows\SystemTemp for LocalSystem on Windows 11,
+        // C:\Windows\Temp for other service contexts, %LOCALAPPDATA%\Temp for a signed-in user —
+        // so without these the SAME path tokenised two ways depending on which process asked.
+        // Measured on the real store: C:\Windows\SystemTemp\{guid}\DismHost.exe is recorded as
+        // %temp% (trust 0.10) because the service wrote it, and recomputing it in the unelevated
+        // process gave %windir% (trust 0.85) — a re-key AND an eightfold trust increase for a
+        // directory that exists to hold transient payloads.
+        //
+        // Entity keys are persisted and shared between both halves of HERO, so a prefix table that
+        // disagrees across processes is a store that disagrees with itself.
+        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (!string.IsNullOrWhiteSpace(windows))
+        {
+            Add(Path.Combine(windows, "SystemTemp"), "%TEMP%");
+            Add(Path.Combine(windows, "Temp"), "%TEMP%");
+        }
+
         Add(Environment.GetFolderPath(Environment.SpecialFolder.System), "%SYS32%");
         Add(Environment.GetFolderPath(Environment.SpecialFolder.SystemX86), "%SYSWOW%");
         Add(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "%WINDIR%");
@@ -380,6 +445,29 @@ internal static class PathModel
         Add(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "%LOCALAPPDATA%");
         Add(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "%APPDATA%");
         Add(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "%USERPROFILE%");
+
+        // And the same four for every signed-in account. Inside the service the four above resolve
+        // under systemprofile, so without these a real user's path matched no prefix at all and
+        // tokenised to its literal self: C:\Users\finla\AppData\Local\x.exe stayed
+        // c:\users\finla\appdata\local\x.exe. That is not merely untidy — it is what BaseTrust
+        // reads, so every such path missed the 0.30 %LOCALAPPDATA% tier and landed on the 0.45
+        // "ordinary fixed drive" default, scoring a profile drop as MORE trustworthy than it is.
+        //
+        // Several users mapping onto one token is intended, not a collision: the token set is
+        // documented as the machine-independent form of a path, and two accounts running the same
+        // program from the same relative location are the same thing as far as the model is
+        // concerned. On a single-user machine it makes no difference at all.
+        try
+        {
+            foreach (var u in Core.UserHives.Folders())
+            {
+                Add(u.Temp, "%TEMP%");
+                Add(u.LocalAppData, "%LOCALAPPDATA%");
+                Add(u.RoamingAppData, "%APPDATA%");
+                Add(u.Profile, "%USERPROFILE%");
+            }
+        }
+        catch { /* the current identity's roots above still stand */ }
 
         // Longest first, so %TEMP% (which lives inside %LOCALAPPDATA%) wins over its own parent.
         return list.Where(t => t.Item1.Length > 0)
@@ -585,7 +673,19 @@ internal sealed class Baseline
 {
     // ---------------------------------------------------------------- tunables (one place)
 
-    internal const int CurrentSchema = 1;
+    /// <summary>
+    /// 2 — entity keys re-minted after path tokenisation learned about signed-in users.
+    ///
+    /// Under schema 1, inside the LocalSystem service, no per-user prefix matched, so every path
+    /// under a real profile tokenised to its literal self and hashed to a key derived from that.
+    /// Now those paths tokenise to %LOCALAPPDATA%, %APPDATA%, %USERPROFILE% and %TEMP%, which is a
+    /// different string and therefore a different key. Without the migration below every affected
+    /// entity would be orphaned: still in the file, never matched again, and re-minted as a
+    /// zero-history stranger on its next execution — including the ones the user had BLOCKED,
+    /// which would come back as State.New with a clean record. That failure is silent and it fails
+    /// open, which is why this is a schema bump and not a quiet behaviour change.
+    /// </summary>
+    internal const int CurrentSchema = 2;
     /// <summary>Scoring-model version. Bump to invalidate cached derived state; no migration.</summary>
     internal const int CurrentEpoch = 1;
 
@@ -746,6 +846,107 @@ internal sealed class Baseline
         }
     }
 
+    /// <summary>
+    /// Re-keys everything the old tokenisation minted, so nothing the user taught HERO is lost.
+    ///
+    /// The map is exact and needs no guesswork: each entity carries both the key it was stored
+    /// under and the literal path it was stored for, so the new key is simply KeyFor(RealPath)
+    /// under the new prefix table. Entities with no RealPath — written before that field existed,
+    /// or by a path that failed to tokenise — are left exactly as they are rather than dropped.
+    ///
+    /// Collisions are real and are merged rather than resolved by last-writer-wins: two accounts
+    /// running the same program from the same relative location now share one token, so their two
+    /// old keys arrive at one new key. The merge is deliberately conservative in the direction that
+    /// matters — Blocked and UserAllowed are ORed, counts are summed, the earliest FirstSeen and
+    /// the latest LastSeen win. A merge must never be the reason something stops being blocked.
+    /// </summary>
+    private void MigrateToTokenisedUserPaths()
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        var rebuilt = new Dictionary<string, BaselineEntity>(Entities.Count, StringComparer.Ordinal);
+        int moved = 0, merged = 0;
+
+        foreach (var (oldKey, e) in Entities)
+        {
+            if (e is null) continue;
+
+            string newKey = e.RealPath.Length > 0 ? PathModel.KeyFor(e.RealPath) : oldKey;
+            if (newKey.Length == 0) newKey = oldKey;
+
+            if (!string.Equals(newKey, oldKey, StringComparison.Ordinal))
+            {
+                map[oldKey] = newKey;
+                moved++;
+                e.Key = newKey;
+                e.Path = PathModel.Tokenise(e.RealPath);
+            }
+
+            if (rebuilt.TryGetValue(newKey, out var existing))
+            {
+                Merge(existing, e);
+                merged++;
+            }
+            else rebuilt[newKey] = e;
+        }
+
+        Entities = rebuilt;
+
+        // The allowlist points at entity keys. An entry whose key stops resolving does not error —
+        // it simply never matches, which looks exactly like an approval the user never gave.
+        foreach (var entry in Allowlist)
+            if (entry.EntityKey.Length > 0 && map.TryGetValue(entry.EntityKey, out var moved2))
+                entry.EntityKey = moved2;
+
+        // Earned directory trust is keyed by tokenised DIRECTORY, and unlike entities there is no
+        // stored literal to recompute it from. Dropped rather than guessed: the penalty is trust
+        // the user's kills have ERODED, so losing it restores trust rather than granting it, and it
+        // is re-earned by the same evidence within days. Guessing a mapping could silently move a
+        // penalty onto the wrong directory, which is the failure that cannot be undone.
+        int penalties = DirectoryPenalties.Count;
+        DirectoryPenalties.Clear();
+
+        // The outcome ledger keys the user's own corrections the same way, in its own file.
+        int outcomes = map.Count > 0 ? OutcomeStore.RemapEntityKeys(map) : 0;
+
+        // Logging must never be the reason a migration fails. The service log is deliberately
+        // write-protected against the interactive user, and the in-process guardian runs as
+        // exactly that user — so this call can legitimately be refused.
+        try
+        {
+            if (moved > 0 || penalties > 0)
+            {
+                Service.ServiceLog.Write(
+                    $"Baseline schema 1 -> 2: {moved} entity key(s) re-minted for per-user path " +
+                    $"tokenisation, {merged} merged, {Allowlist.Count} allowlist entr(ies) checked, " +
+                    $"{outcomes} outcome record(s) remapped, {penalties} directory penalt(ies) dropped to re-earn.");
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Folds <paramref name="from"/> into <paramref name="into"/>, never losing a restriction.</summary>
+    private static void Merge(BaselineEntity into, BaselineEntity from)
+    {
+        into.Count += from.Count;
+        into.Allows += from.Allows;
+        into.Denies += from.Denies;
+
+        if (from.FirstSeenUtc != default && (into.FirstSeenUtc == default || from.FirstSeenUtc < into.FirstSeenUtc))
+            into.FirstSeenUtc = from.FirstSeenUtc;
+        if (from.LastSeenUtc > into.LastSeenUtc) into.LastSeenUtc = from.LastSeenUtc;
+
+        // One-way: a restriction survives the merge, a permission does not create one.
+        into.Blocked |= from.Blocked;
+        into.UserAllowed |= from.UserAllowed;
+        into.SignerChanged |= from.SignerChanged;
+
+        // Blocked is negative and orders below everything, so Min keeps it. Otherwise the
+        // better-known of the two wins, which is the honest reading of "we have seen both".
+        into.State = into.Blocked || from.Blocked
+            ? EntityState.Blocked
+            : (EntityState)Math.Max((int)into.State, (int)from.State);
+    }
+
     private void AfterLoad()
     {
         Entities ??= new();
@@ -772,6 +973,9 @@ internal sealed class Baseline
             CreatedUtc = DateTime.UtcNow;
             ObservedHours = 0; BootSessions = 0;
         }
+
+        if (Schema < 2) MigrateToTokenisedUserPaths();
+        Schema = CurrentSchema;
 
         bool epochChanged = Epoch != CurrentEpoch;
         Epoch = CurrentEpoch;

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Hero.Core;
 
@@ -212,6 +213,81 @@ internal static class OutcomeStore
     /// A torn final line is ordinary — the process can be killed mid-append — and is skipped rather
     /// than treated as corruption, which is why each line is its own document.
     /// </summary>
+    /// <summary>
+    /// Rewrites entity keys in both ledger files after a baseline re-key. Returns how many records
+    /// were changed.
+    ///
+    /// These records are the user's own corrections — "you were wrong about this" — and they are
+    /// keyed by the same entity key the baseline mints. When that key changes, an untouched ledger
+    /// keeps every correction and applies none of them: <see cref="InfluenceFor"/> counts distinct
+    /// programs per rule, and a correction filed under a key nothing resolves to counts toward
+    /// nothing. The user would have to tell HERO the same thing again.
+    ///
+    /// Rewritten through JsonNode rather than the Entry record so that any field a newer build
+    /// added survives the round trip. Parsing into Entry and re-serialising would silently drop
+    /// them, which is the same class of data loss this method exists to prevent.
+    ///
+    /// Written to a temp file and moved into place, per file, so an interrupted migration leaves
+    /// the original ledger intact rather than half-rewritten.
+    /// </summary>
+    internal static int RemapEntityKeys(IReadOnlyDictionary<string, string> map)
+    {
+        if (map.Count == 0) return 0;
+
+        int changed = 0;
+        lock (Gate)
+        {
+            foreach (var path in new[] { PreviousPath, LedgerPath })
+            {
+                if (!File.Exists(path)) continue;
+
+                var rewritten = new List<string>(256);
+                bool touched = false;
+
+                try
+                {
+                    foreach (var line in File.ReadLines(path))
+                    {
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+
+                        JsonNode? node;
+                        // A torn final line is ordinary here — the process can be killed
+                        // mid-append — and is carried through unchanged rather than dropped.
+                        try { node = JsonNode.Parse(line); }
+                        catch { rewritten.Add(line); continue; }
+
+                        if (node is JsonObject obj
+                            && obj["ek"]?.GetValue<string>() is { Length: > 0 } key
+                            && map.TryGetValue(key, out var replacement))
+                        {
+                            obj["ek"] = replacement;
+                            rewritten.Add(obj.ToJsonString(Json));
+                            touched = true;
+                            changed++;
+                        }
+                        else rewritten.Add(line);
+                    }
+
+                    if (!touched) continue;
+
+                    string temp = path + ".migrating";
+                    File.WriteAllLines(temp, rewritten, Encoding.UTF8);
+                    File.Move(temp, path, overwrite: true);
+                }
+                catch
+                {
+                    // The ledger is evidence, not state. A failed rewrite leaves it exactly as it
+                    // was, which costs the user's corrections their influence but loses nothing.
+                    try { File.Delete(path + ".migrating"); } catch { }
+                }
+            }
+
+            _influence = null;      // conclusions drawn from the old keys no longer hold
+        }
+
+        return changed;
+    }
+
     private static IEnumerable<Entry> ReadAll()
     {
         foreach (var path in new[] { PreviousPath, LedgerPath })

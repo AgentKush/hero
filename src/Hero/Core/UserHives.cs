@@ -1,0 +1,172 @@
+using Microsoft.Win32;
+using System.Security.Principal;
+
+namespace Hero.Core;
+
+/// <summary>One signed-in account whose registry hive is currently loaded.</summary>
+/// <param name="Sid">The account's SID, which is also its subkey name under HKEY_USERS.</param>
+/// <param name="ProfilePath">Filesystem profile root, from ProfileList. Empty when unknown.</param>
+/// <param name="Account">DOMAIN\user where it could be resolved, otherwise the SID.</param>
+internal readonly record struct UserHive(string Sid, string ProfilePath, string Account)
+{
+    /// <summary>How this hive should be named in a finding: HKU\&lt;account&gt; reads better than a SID.</summary>
+    internal string DisplayRoot => $"HKU\\{Account}";
+}
+
+/// <summary>
+/// The signed-in users HERO should be looking at, rather than whoever HERO happens to be running as.
+///
+/// THIS EXISTS BECAUSE THE GUARDIAN MOVED INTO A SERVICE AND NOTHING FOLLOWED IT. Every
+/// profile-relative lookup in the engine was written when HERO ran as the signed-in user, where
+/// <c>Registry.CurrentUser</c> and <c>Environment.GetFolderPath</c> mean what you would expect.
+/// Under LocalSystem they still resolve — silently, and to the wrong place: HKCU becomes the
+/// service account's own hive, and the profile folders resolve inside
+/// <c>C:\Windows\system32\config\systemprofile</c>. Nothing errors. The scan simply comes back
+/// empty and reports a clean machine.
+///
+/// The cost of that was the whole point of the product: every per-user Run key and Startup folder
+/// on the machine — which is the autorun surface that does not need administrator rights, and so
+/// the one most malware actually uses — went unscanned in the shipping configuration.
+///
+/// ENUMERATING LOADED HIVES rather than resolving "the console user" is deliberate, and it is the
+/// better answer for a scanner rather than merely the easier one. A machine can have several
+/// people signed in at once, and an autorun belonging to the switched-out account is no less real
+/// than one belonging to the person at the keyboard. It also needs no token and no privilege: the
+/// same code gives the right answer when HERO runs as LocalSystem, and when the unelevated
+/// in-process guardian runs it and can see only its own hive.
+///
+/// A hive is here because it is LOADED, which for a normal account means that user is signed in.
+/// Users who are logged off are deliberately not scanned: their autoruns cannot run until they log
+/// on, at which point their hive loads and the next sweep sees them.
+/// </summary>
+internal static class UserHives
+{
+    private const string ProfileList =
+        @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
+
+    /// <summary>
+    /// Every loaded human account hive, newest lookup each call.
+    ///
+    /// Not cached: users sign in and out, and a scanner that cached this at start-up would keep
+    /// reporting on a hive that had gone and miss one that arrived. The whole call is a handful of
+    /// registry reads.
+    /// </summary>
+    internal static IReadOnlyList<UserHive> Loaded()
+    {
+        var result = new List<UserHive>(4);
+
+        try
+        {
+            foreach (var sid in Registry.Users.GetSubKeyNames())
+            {
+                // S-1-5-21-… is the shape of an account issued by a local machine or a domain.
+                // Everything else under HKEY_USERS is Windows' own: .DEFAULT, and the built-in
+                // service accounts S-1-5-18/19/20 — one of which is the hive HERO was reading.
+                if (!sid.StartsWith("S-1-5-21-", StringComparison.Ordinal)) continue;
+
+                // Every loaded hive has a _Classes companion holding HKCR. It is the same user.
+                if (sid.EndsWith("_Classes", StringComparison.OrdinalIgnoreCase)) continue;
+
+                result.Add(new UserHive(sid, ProfilePathOf(sid), AccountOf(sid)));
+            }
+        }
+        catch { /* HKEY_USERS unreadable: fall through to the self fallback below */ }
+
+        // Nothing enumerable — which happens when the process cannot read HKEY_USERS at all.
+        // Fall back to the account HERO is running as, so an unelevated guardian still scans the
+        // user it belongs to rather than scanning nothing.
+        if (result.Count == 0)
+        {
+            try
+            {
+                using var me = WindowsIdentity.GetCurrent();
+                if (me.User is { } sid && sid.Value.StartsWith("S-1-5-21-", StringComparison.Ordinal))
+                    result.Add(new UserHive(sid.Value, ProfilePathOf(sid.Value), me.Name));
+            }
+            catch { }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Opens one user's hive under HKEY_USERS, in the requested view.
+    ///
+    /// Returns null rather than throwing when the hive cannot be opened — running unelevated, one
+    /// user cannot read another's hive, and that is an ordinary outcome rather than an error.
+    /// </summary>
+    internal static RegistryKey? Open(UserHive user, RegistryView view, string subPath)
+    {
+        try
+        {
+            using var users = RegistryKey.OpenBaseKey(RegistryHive.Users, view);
+            return users.OpenSubKey($"{user.Sid}\\{subPath}");
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// One user's Startup folder.
+    ///
+    /// Read from the user's own shell-folder registration rather than assembled from a convention,
+    /// because a redirected profile — roaming, or a OneDrive-backed Known Folder — puts it
+    /// somewhere the convention does not predict. The conventional path is the last resort, not
+    /// the first guess.
+    /// </summary>
+    internal static string StartupFolder(UserHive user)
+    {
+        // Shell Folders holds the already-expanded path, which is why it is tried first: expanding
+        // the %USERPROFILE% in User Shell Folders would expand it in HERO's environment, and under
+        // the service that is the systemprofile directory all over again.
+        using (var shell = Open(user, RegistryView.Registry64,
+                   @"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"))
+        {
+            if (shell?.GetValue("Startup") is string { Length: > 0 } expanded)
+                return expanded;
+        }
+
+        using (var unexpanded = Open(user, RegistryView.Registry64,
+                   @"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"))
+        {
+            if (unexpanded?.GetValue("Startup", null,
+                    RegistryValueOptions.DoNotExpandEnvironmentNames) is string { Length: > 0 } raw
+                && user.ProfilePath.Length > 0)
+            {
+                // Substituted against THIS user's profile, never the environment's.
+                return raw.Replace("%USERPROFILE%", user.ProfilePath, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        return user.ProfilePath.Length > 0
+            ? Path.Combine(user.ProfilePath, @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup")
+            : "";
+    }
+
+    private static string ProfilePathOf(string sid)
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey($@"{ProfileList}\{sid}");
+            // Expanded here rather than left raw: ProfileImagePath is REG_EXPAND_SZ containing
+            // %SystemDrive%, which is machine-wide and so means the same thing to every account.
+            if (key?.GetValue("ProfileImagePath") is string { Length: > 0 } path)
+                return Environment.ExpandEnvironmentVariables(path);
+        }
+        catch { }
+        return "";
+    }
+
+    private static string AccountOf(string sid)
+    {
+        try
+        {
+            return new SecurityIdentifier(sid).Translate(typeof(NTAccount)).Value;
+        }
+        catch
+        {
+            // An account from a domain this machine cannot reach, or one since deleted. The SID is
+            // still a true and usable name for it.
+            return sid;
+        }
+    }
+}

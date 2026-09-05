@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Hero.Core;
 using Microsoft.Win32;
 
 namespace Hero.Guardian;
@@ -106,13 +107,28 @@ internal static class PersistenceScanner
 
     private static void ScanRunKeys(List<PersistenceEntry> into)
     {
+        // Resolved once per sweep rather than per location: this is a handful of registry reads,
+        // but there are eleven locations times two views.
+        var users = UserHives.Loaded();
+
         foreach (var (hive, path, category) in RunLocations)
         {
             foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
             {
                 // The 32-bit view of an unredirected key returns the same data; deduplication
                 // below removes the doubles rather than special-casing which keys redirect.
-                ReadValues(hive, view, path, category, into);
+                if (hive == RegistryHive.CurrentUser)
+                {
+                    // NOT HKCU. Under the LocalSystem service HKCU is the service account's own
+                    // hive, which has no Run keys and never will — so every per-user autorun on
+                    // the machine went unseen and the page came back clean. Read each signed-in
+                    // user's hive by SID instead. See UserHives.
+                    foreach (var user in users) ReadUserValues(user, view, path, category, into);
+                }
+                else
+                {
+                    ReadValues(hive, view, path, category, into);
+                }
             }
         }
 
@@ -164,6 +180,63 @@ internal static class PersistenceScanner
     }
 
     /// <summary>
+    /// The per-user twin of <see cref="ReadValues"/>, reading one named user's hive under
+    /// HKEY_USERS instead of whatever HKCU happens to mean to this process.
+    ///
+    /// The location string names the account rather than saying "HKCU", because on a machine with
+    /// two people signed in "HKCU\...\Run" does not identify anything, and the whole point of a
+    /// finding is that the user can go and look at the thing it names.
+    /// </summary>
+    private static void ReadUserValues(UserHive user, RegistryView view, string path,
+                                       PersistenceCategory category, List<PersistenceEntry> into)
+    {
+        string location = $"{user.DisplayRoot}\\{path}" + (view == RegistryView.Registry32 ? " (WOW64)" : "");
+
+        try
+        {
+            using var key = UserHives.Open(user, view, path);
+            if (key is null) return;
+
+            foreach (var name in key.GetValueNames())
+            {
+                var raw = key.GetValue(name)?.ToString() ?? "";
+                if (string.IsNullOrWhiteSpace(raw)) continue;
+
+                into.Add(new PersistenceEntry
+                {
+                    Category = category,
+                    Location = location,
+                    Name = name,
+                    Target = raw,
+                    ImagePath = ExtractExecutable(raw),
+                    Enabled = IsUserStartupApproved(user, path, name),
+                });
+            }
+        }
+        catch (System.Security.SecurityException) { into.Add(Denied(category, location)); }
+        catch (UnauthorizedAccessException) { into.Add(Denied(category, location)); }
+        catch { /* transient */ }
+    }
+
+    /// <summary>
+    /// <see cref="IsStartupApproved"/> for a named user's hive. StartupApproved is per-user, so
+    /// reading it out of the service's own hive would have reported every user's disabled entry as
+    /// enabled — the same defect as the Run keys themselves, one level down.
+    /// </summary>
+    private static bool IsUserStartupApproved(UserHive user, string runPath, string valueName)
+    {
+        try
+        {
+            using var key = UserHives.Open(user, RegistryView.Registry64,
+                @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run");
+            if (key?.GetValue(valueName) is byte[] { Length: > 0 } b)
+                return b[0] != 2 && b[0] != 6;
+        }
+        catch { }
+        return true;
+    }
+
+    /// <summary>
     /// Windows records user-disabled startup items in StartupApproved. An entry can be present
     /// in a Run key yet switched off in Task Manager; reporting it as active would be wrong.
     /// The first byte of the binary value is 2 or 6 when disabled.
@@ -188,13 +261,14 @@ internal static class PersistenceScanner
 
     private static void ScanStartupFolders(List<PersistenceEntry> into)
     {
-        var folders = new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup),
-        };
+        // CommonStartup is machine-wide, so it resolves correctly whoever HERO is running as and
+        // is read straight from the environment. The per-user one is not: under the service
+        // SpecialFolder.Startup lands in C:\Windows\system32\config\systemprofile, a directory
+        // that exists, contains nothing, and reports a clean result for every account on the box.
+        var folders = new List<string> { Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup) };
+        folders.AddRange(UserHives.Loaded().Select(UserHives.StartupFolder));
 
-        foreach (var folder in folders.Where(f => !string.IsNullOrEmpty(f)))
+        foreach (var folder in folders.Where(f => !string.IsNullOrEmpty(f)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             try
             {

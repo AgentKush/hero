@@ -668,10 +668,26 @@ internal sealed class ThreatsPage : PageBase
         PersistenceSubject p when p.Entry.Category == PersistenceCategory.Service =>
             new ElevationRequest(ElevatedOperation.ReconfigureService, new[] { p.Entry.Name, "disabled" }),
 
-        PersistenceSubject p when p.Entry.Category is PersistenceCategory.RunKey or PersistenceCategory.Winlogon
+        // IFEO joins Run and Winlogon here: it is always HKLM, so without an elevated route a
+        // detected Debugger hijack had no way to be removed at all.
+        PersistenceSubject p when p.Entry.Category is PersistenceCategory.RunKey
+                                      or PersistenceCategory.Winlogon
+                                      or PersistenceCategory.ImageFileExecutionOptions
                                   && p.Entry.Location.StartsWith("HKLM", StringComparison.OrdinalIgnoreCase) =>
             new ElevationRequest(ElevatedOperation.RemoveMachinePersistence,
-                new[] { p.Entry.Location[5..].Replace(" (WOW64)", ""), p.Entry.Name }),
+                new[]
+                {
+                    p.Entry.Location[5..].Replace(" (WOW64)", ""),
+
+                    // The VALUE, which for IFEO is Debugger rather than the entry's own name.
+                    p.Entry.EffectiveValueName,
+
+                    // The marker stripped from the path above says which registry view the value
+                    // lives in, and dropping it entirely was the bug: a 32-bit application's Run
+                    // entry was deleted from the 64-bit key, which never held it, and the helper
+                    // reported success.
+                    p.Entry.Location.Contains("(WOW64)", StringComparison.OrdinalIgnoreCase) ? "32" : "64",
+                }),
 
         ProcessSubject p when !p.Process.PathUnavailable =>
             new ElevationRequest(ElevatedOperation.BlockProcessNetwork,

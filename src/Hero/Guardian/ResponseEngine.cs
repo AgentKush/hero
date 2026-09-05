@@ -1990,7 +1990,12 @@ internal sealed class ResponseEngine : IDisposable
     private ResponseResult RemoveRegistryValue(PersistenceEntry entry, string actionId, string incidentId,
                                                string reason, bool userInitiated, bool autonomous)
     {
-        string target = $"{entry.Location}\\{entry.Name}";
+        // The value to delete, which is not always the name the finding is filed under — see
+        // PersistenceEntry.ValueName. Read once and used for every registry operation below, so
+        // the undo record captures the same value the delete removes.
+        string valueName = entry.EffectiveValueName;
+
+        string target = $"{entry.Location}\\{valueName}";
         bool describeOnly = DryRun || !Authorised(userInitiated, autonomous);
 
         if (!TryParseRegistryLocation(entry.Location, out IntPtr hive, out string hiveName,
@@ -2002,7 +2007,7 @@ internal sealed class ResponseEngine : IDisposable
                 ActionId = actionId, IncidentId = incidentId, Target = target,
             });
 
-        if (!TryReadRawValue(hive, subKey, entry.Name, wow32, out uint kind, out byte[] data, out int readErr))
+        if (!TryReadRawValue(hive, subKey, valueName, wow32, out uint kind, out byte[] data, out int readErr))
             return Record(new ResponseResult
             {
                 Rung = ResponseRung.RemovePersistence,
@@ -2015,7 +2020,7 @@ internal sealed class ResponseEngine : IDisposable
 
         var registryUndo = new RegistryUndo
         {
-            Hive = hiveName, SubKey = subKey, ValueName = entry.Name,
+            Hive = hiveName, SubKey = subKey, ValueName = valueName,
             ValueKind = kind, ValueBase64 = Convert.ToBase64String(data), Wow6432 = wow32,
         };
 
@@ -2024,7 +2029,7 @@ internal sealed class ResponseEngine : IDisposable
         if (subKey.EndsWith(@"CurrentVersion\Run", StringComparison.OrdinalIgnoreCase))
         {
             const string approved = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-            if (TryReadRawValue(hive, approved, entry.Name, false, out uint aKind, out byte[] aData, out _))
+            if (TryReadRawValue(hive, approved, valueName, false, out uint aKind, out byte[] aData, out _))
             {
                 registryUndo.StartupApprovedSubKey = approved;
                 registryUndo.StartupApprovedKind = aKind;
@@ -2065,7 +2070,7 @@ internal sealed class ResponseEngine : IDisposable
                 ActionId = actionId, IncidentId = incidentId, Target = target,
             });
 
-        int err = DeleteValue(hive, subKey, entry.Name, wow32);
+        int err = DeleteValue(hive, subKey, valueName, wow32);
         if (err != 0)
             return Record(new ResponseResult
             {
@@ -2076,12 +2081,12 @@ internal sealed class ResponseEngine : IDisposable
                     : $"Could not delete {target} (error {err}).",
                 ActionId = actionId, IncidentId = incidentId, Target = target,
                 UndoRecordPath = undoPath, ForensicSnapshotPath = snapshotPath, Autonomous = autonomous,
-                Details = new[] { $"reg delete \"{hiveName}\\{subKey}\" /v \"{entry.Name}\" /f" },
+                Details = new[] { $"reg delete \"{hiveName}\\{subKey}\" /v \"{valueName}\" /f" },
             });
 
         // Remove the StartupApproved companion too, otherwise a stale entry lingers there.
         if (registryUndo.StartupApprovedSubKey.Length > 0)
-            DeleteValue(hive, registryUndo.StartupApprovedSubKey, entry.Name, false);
+            DeleteValue(hive, registryUndo.StartupApprovedSubKey, valueName, false);
 
         undo.State = "committed";
         WriteUndoRecord(undo);
@@ -2089,7 +2094,7 @@ internal sealed class ResponseEngine : IDisposable
         return Record(new ResponseResult
         {
             Rung = ResponseRung.RemovePersistence, Outcome = ActionOutcome.Performed,
-            Message = $"Removed the startup entry {entry.Name}. It will not run at logon any more, and HERO kept its exact original value so you can put it back.",
+            Message = $"Removed {target}. It will not run at logon any more, and HERO kept its exact original value so you can put it back.",
             ActionId = actionId, IncidentId = incidentId, Target = target,
             UndoRecordPath = undoPath, ForensicSnapshotPath = snapshotPath, Autonomous = autonomous,
         });
@@ -3001,3 +3006,5 @@ internal sealed class ResponseEngine : IDisposable
     [DllImport("advapi32.dll", SetLastError = false)]
     private static extern int RegCloseKey(IntPtr hKey);
 }
+
+

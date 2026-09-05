@@ -42,6 +42,26 @@ internal sealed record PersistenceEntry
     /// HERO Guardian registrations.
     /// </summary>
     internal string DisplayName { get; init; } = "";
+    /// <summary>
+    /// The REGISTRY VALUE to operate on, when that is not the same thing as <see cref="Name"/>.
+    ///
+    /// For a Run key the two are identical — the value is the entry, and its name is what the user
+    /// recognises. IFEO is the exception and it is the reason this exists: the entry is a SUBKEY
+    /// named after the program being hijacked (notepad.exe), while the thing that does the
+    /// hijacking is a value inside it called Debugger. The scanner puts the program in Name because
+    /// that is what a person needs to read; removal needs the value, and using Name for both meant
+    /// HERO looked for a value called "notepad.exe" inside the notepad.exe key, found nothing, and
+    /// reported that it could not read the current value — so an IFEO hijack could be detected and
+    /// never removed.
+    ///
+    /// Defaults to Name, so every other category is unaffected and a new one has to opt in
+    /// deliberately rather than inherit a wrong answer.
+    /// </summary>
+    internal string ValueName { get; init; } = "";
+
+    /// <summary>The registry value name to act on. <see cref="ValueName"/> when set, else <see cref="Name"/>.</summary>
+    internal string EffectiveValueName => ValueName.Length > 0 ? ValueName : Name;
+
     /// <summary>The raw command line or target as stored.</summary>
     internal required string Target { get; init; }
     /// <summary>Executable extracted from <see cref="Target"/>, when one could be resolved.</summary>
@@ -363,7 +383,10 @@ internal static class PersistenceScanner
                     {
                         Category = PersistenceCategory.ImageFileExecutionOptions,
                         Location = $"HKLM\\{path}\\{sub}",
+                        // The hijacked program, because that is the fact a person needs. The value
+                        // that has to be deleted to undo it is Debugger, inside this key.
                         Name = sub,
+                        ValueName = "Debugger",
                         Target = dbg,
                         ImagePath = ExtractExecutable(dbg),
                     });

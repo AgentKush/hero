@@ -43,6 +43,35 @@ internal static class ElevatedOperations
         @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
     };
 
+    /// <summary>
+    /// The one autorun family that cannot be an exact-match entry above: IFEO keys are named after
+    /// the program being hijacked, so there is one per victim and the list would be unbounded.
+    /// </summary>
+    private const string IfeoRoot = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\";
+
+    /// <summary>
+    /// Whether this key and value are one HERO will delete while elevated.
+    ///
+    /// Exact match everywhere except IFEO, and IFEO is deliberately narrow rather than a prefix
+    /// rule: exactly one path segment below the root, and the value must be Debugger. Allowing any
+    /// depth would reach the per-architecture subkeys, and allowing any value name would let this
+    /// clear GlobalFlag and MinimumStackCommitInBytes — real settings that are not hijacks. The
+    /// point of this list is that an elevated helper cannot be turned into a general-purpose
+    /// privileged registry editor, and a loose prefix would give that away.
+    /// </summary>
+    private static bool IsAllowedAutorunKey(string path, string valueName)
+    {
+        if (AllowedMachineAutorunKeys.Any(k => string.Equals(k, path, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        if (!path.StartsWith(IfeoRoot, StringComparison.OrdinalIgnoreCase)) return false;
+
+        string image = path[IfeoRoot.Length..].Trim('\\');
+        return image.Length > 0
+            && !image.Contains('\\')
+            && valueName.Equals("Debugger", StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static int Execute(ElevationRequest request)
     {
         try
@@ -96,20 +125,38 @@ internal static class ElevatedOperations
         return Log(ExitPerformed, $"Set {name} start type to {args[1]}.");
     }
 
-    /// <summary>args: [subKeyPath, valueName]</summary>
+    /// <summary>
+    /// args: [subKeyPath, valueName] or [subKeyPath, valueName, "32" | "64"]
+    ///
+    /// THE VIEW IS PART OF THE ADDRESS. Without it this opened Registry.LocalMachine, which in a
+    /// 64-bit process is the 64-bit view — so a value living under WOW6432Node was looked for in
+    /// the key that never had it, found absent, and reported as ExitPerformed. HERO announced it
+    /// had removed a 32-bit application's Run entry and the entry was still there at the next
+    /// logon. The caller compounded it by stripping the " (WOW64)" marker off the location before
+    /// sending it, discarding the only thing that said which view to use.
+    ///
+    /// Omitted means 64, so an older caller keeps its existing behaviour rather than silently
+    /// changing which key it edits.
+    /// </summary>
     private static int RemoveMachinePersistence(IReadOnlyList<string> args)
     {
-        if (args.Count != 2) return Log(ExitRefused, "RemoveMachinePersistence expects a key path and a value name.");
+        if (args.Count is not (2 or 3))
+            return Log(ExitRefused, "RemoveMachinePersistence expects a key path, a value name, and optionally a registry view.");
 
         string path = args[0].Trim('\\');
         string value = args[1];
 
-        if (!AllowedMachineAutorunKeys.Any(k => string.Equals(k, path, StringComparison.OrdinalIgnoreCase)))
+        var view = args.Count == 3 && args[2] == "32" ? RegistryView.Registry32 : RegistryView.Registry64;
+        string viewLabel = view == RegistryView.Registry32 ? " (32-bit view)" : "";
+
+        if (!IsAllowedAutorunKey(path, value))
             return Log(ExitRefused, $"Refusing to modify {path}: not one of HERO's known autorun locations.");
 
-        using var key = Registry.LocalMachine.OpenSubKey(path, writable: true);
-        if (key is null) return Log(ExitRefused, $"Key not found: {path}");
-        if (key.GetValue(value) is null) return Log(ExitPerformed, $"{value} was already absent from {path}.");
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+        using var key = baseKey.OpenSubKey(path, writable: true);
+        if (key is null) return Log(ExitRefused, $"Key not found: {path}{viewLabel}");
+        if (key.GetValue(value) is null)
+            return Log(ExitPerformed, $"{value} was already absent from {path}{viewLabel}.");
 
         // Winlogon values must never be deleted outright: Userinit and Shell are required for a
         // usable desktop. HERO only ever resets them to their documented defaults.

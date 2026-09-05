@@ -90,17 +90,38 @@ internal static class PersistenceScanner
     /// </summary>
     private static readonly string[] WinlogonValues = { "Userinit", "Shell", "AppSetup", "GinaDLL", "TaskMan" };
 
-    internal static List<PersistenceEntry> Scan()
+    /// <summary>
+    /// One sweep's findings, and whether the sweep actually saw everything it was meant to.
+    ///
+    /// THE COVERAGE FLAG IS THE POINT. Each scanner used to swallow whatever went wrong and return
+    /// the entries it had managed to collect, so a sweep that failed outright was indistinguishable
+    /// from a machine with nothing to find — and the consumer treats absence as proof: anything
+    /// with a persist: key that a completed sweep did not re-raise is deleted as stale. A failed
+    /// registry read therefore did not merely hide new autoruns, it silently erased the findings
+    /// HERO had already made about the old ones.
+    ///
+    /// So absence is only evidence when the sweep was complete, and now the sweep says which.
+    /// </summary>
+    internal sealed record PersistenceScan(List<PersistenceEntry> Entries, List<string> Failures)
+    {
+        /// <summary>True when every scanner ran to the end. Only then does "not found" mean "not there".</summary>
+        internal bool Complete => Failures.Count == 0;
+    }
+
+    internal static PersistenceScan Scan()
     {
         var entries = new List<PersistenceEntry>(256);
+        var failures = new List<string>();
+
         ScanRunKeys(entries);
         ScanStartupFolders(entries);
-        ScanWinlogon(entries);
-        ScanImageFileExecutionOptions(entries);
-        ScanAppInitDlls(entries);
-        ScanServices(entries);
-        ScanScheduledTasks(entries);
-        return entries;
+        ScanWinlogon(entries, failures);
+        ScanImageFileExecutionOptions(entries, failures);
+        ScanAppInitDlls(entries, failures);
+        ScanServices(entries, failures);
+        ScanScheduledTasks(entries, failures);
+
+        return new PersistenceScan(entries, failures);
     }
 
     // ------------------------------------------------------------ run keys
@@ -295,7 +316,7 @@ internal static class PersistenceScanner
 
     // ------------------------------------------------------------- winlogon
 
-    private static void ScanWinlogon(List<PersistenceEntry> into)
+    private static void ScanWinlogon(List<PersistenceEntry> into, List<string> failures)
     {
         const string path = @"Software\Microsoft\Windows NT\CurrentVersion\Winlogon";
         try
@@ -315,12 +336,12 @@ internal static class PersistenceScanner
                 });
             }
         }
-        catch { }
+        catch (Exception ex) { failures.Add($"Winlogon ({ex.GetType().Name})"); }
     }
 
     // ----------------------------------------------------------------- IFEO
 
-    private static void ScanImageFileExecutionOptions(List<PersistenceEntry> into)
+    private static void ScanImageFileExecutionOptions(List<PersistenceEntry> into, List<string> failures)
     {
         const string path = @"Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
         try
@@ -347,13 +368,13 @@ internal static class PersistenceScanner
                         ImagePath = ExtractExecutable(dbg),
                     });
                 }
-                catch { }
+                catch { /* one malformed subkey is not a failed sweep */ }
             }
         }
-        catch { }
+        catch (Exception ex) { failures.Add($"Image File Execution Options ({ex.GetType().Name})"); }
     }
 
-    private static void ScanAppInitDlls(List<PersistenceEntry> into)
+    private static void ScanAppInitDlls(List<PersistenceEntry> into, List<string> failures)
     {
         foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
         {
@@ -374,13 +395,13 @@ internal static class PersistenceScanner
                     ImagePath = ExtractExecutable(dlls),
                 });
             }
-            catch { }
+            catch (Exception ex) { failures.Add($"AppInit_DLLs ({ex.GetType().Name})"); }
         }
     }
 
     // --------------------------------------------------------------- services
 
-    private static void ScanServices(List<PersistenceEntry> into)
+    private static void ScanServices(List<PersistenceEntry> into, List<string> failures)
     {
         // System.ServiceProcess.ServiceController is not in-box on net10.0-windows, so the
         // service database is read straight out of the registry. Confirmed: 841 keys
@@ -438,10 +459,10 @@ internal static class PersistenceScanner
                         Enabled = start <= 2 || triggered,
                     });
                 }
-                catch { }
+                catch { /* one malformed service key is not a failed sweep */ }
             }
         }
-        catch { }
+        catch (Exception ex) { failures.Add($"Services ({ex.GetType().Name})"); }
     }
 
     /// <summary>
@@ -575,7 +596,7 @@ internal static class PersistenceScanner
 
     // -------------------------------------------------------- scheduled tasks
 
-    private static void ScanScheduledTasks(List<PersistenceEntry> into)
+    private static void ScanScheduledTasks(List<PersistenceEntry> into, List<string> failures)
     {
         // The Task Scheduler COM API would avoid a process launch, but schtasks.exe is
         // in-box, needs no interop, and was measured returning all 299 tasks unelevated.
@@ -625,7 +646,7 @@ internal static class PersistenceScanner
                 });
             }
         }
-        catch { }
+        catch (Exception ex) { failures.Add($"Scheduled tasks ({ex.GetType().Name})"); }
     }
 
     /// <summary>Minimal RFC4180 field splitter — schtasks quotes fields containing commas.</summary>

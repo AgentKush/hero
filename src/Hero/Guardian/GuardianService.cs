@@ -779,9 +779,20 @@ internal sealed class GuardianService : IAsyncDisposable
         try
         {
             var fresh = PersistenceScanner.Scan();
-            lock (_persistLock) { _persistence = fresh; PersistenceVersion++; }
+
+            // The inventory is replaced whether or not the sweep was complete — a partial list is
+            // still a better view than a stale one, and this path prunes no verdicts. What it must
+            // not do is answer "gone" on the strength of an incomplete read, which is what the
+            // caller uses to close a finding.
+            lock (_persistLock) { _persistence = fresh.Entries; PersistenceVersion++; }
             PersistenceScannedUtc = DateTime.UtcNow;
-            return fresh.FirstOrDefault(e => e.Key == entry.Key);
+
+            var match = fresh.Entries.FirstOrDefault(e => e.Key == entry.Key);
+            if (match is not null) return match;
+
+            // Not found, and the sweep could not see everything. "I did not find it" is not "it is
+            // not there", so the finding stands rather than being reported as resolved.
+            return fresh.Complete ? null : entry;
         }
         catch { return entry; }
     }
@@ -1000,7 +1011,15 @@ internal sealed class GuardianService : IAsyncDisposable
     {
         try
         {
-            var entries = PersistenceScanner.Scan();
+            var scan = PersistenceScanner.Scan();
+            var entries = scan.Entries;
+
+            if (!scan.Complete)
+            {
+                Service.ServiceLog.Write(
+                    "Persistence sweep INCOMPLETE — could not read: " + string.Join("; ", scan.Failures) +
+                    ". Existing findings will be kept rather than pruned.");
+            }
 
             // Verify the images behind persistence entries in parallel: a serial pass over the
             // 240 executables on this machine took 193s, versus 6.9s parallel.
@@ -1058,7 +1077,13 @@ internal sealed class GuardianService : IAsyncDisposable
             // Only reached when the sweep completed, which is the precondition
             // ReplacePersistenceVerdicts documents: a partial sweep would clear findings it merely
             // failed to see. Anything thrown above lands in the catch below and prunes nothing.
-            ReplacePersistenceVerdicts(raised);
+            //
+            // "Completed" now means more than "did not throw". Each scanner used to swallow its own
+            // failure and return what it had, so a sweep in which the services key or the task
+            // query failed outright still arrived here looking successful — and pruning on that
+            // basis deleted findings HERO had already made, because the entries backing them were
+            // simply not seen this time. Absence is only evidence when the sweep was complete.
+            if (scan.Complete) ReplacePersistenceVerdicts(raised);
 
             Baseline.Save();
         }

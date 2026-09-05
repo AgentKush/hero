@@ -314,6 +314,7 @@ internal sealed class GuardianService : IAsyncDisposable
         }
 
         Engine.Observed += OnObserved;
+        Engine.Faulted += OnEngineFaulted;
         Engine.Start();
 
         // Warm the signature cache and take the first persistence inventory off the poll thread.
@@ -822,6 +823,43 @@ internal sealed class GuardianService : IAsyncDisposable
         Settings = HeroSettings.Load();
         ApplyAutonomy();
         Peers.ResolveHostnames = ReadResolveHostnames();
+    }
+
+    private DateTime _lastFaultLogUtc = DateTime.MinValue;
+    private string _lastFaultType = "";
+
+    /// <summary>
+    /// Records a failed poll where somebody will see it.
+    ///
+    /// The only subscriber to Faulted was MainWindow, which writes the exception type into a
+    /// breadcrumb label. In the service there is no window, so every probe failure was raised into
+    /// an event with nothing attached and discarded — and because a faulted poll skips Observed,
+    /// the guardian went on reporting itself healthy while ingesting nothing.
+    ///
+    /// Throttled, because the loop polls once a second and a broken probe fails every time: the
+    /// first of a kind is written immediately, then at most one line a minute. Without that the
+    /// answer would be buried in its own repetitions, and ServiceLog caps at 2 MB.
+    /// </summary>
+    private void OnEngineFaulted(Exception ex)
+    {
+        try
+        {
+            string type = ex.GetType().Name;
+            var now = DateTime.UtcNow;
+
+            bool newKind = !string.Equals(type, _lastFaultType, StringComparison.Ordinal);
+            if (!newKind && now - _lastFaultLogUtc < TimeSpan.FromMinutes(1)) return;
+
+            _lastFaultType = type;
+            _lastFaultLogUtc = now;
+
+            int run = Engine.ConsecutiveFaults;
+            Service.ServiceLog.Write(
+                $"Monitor poll FAILED ({type}: {ex.Message}). " +
+                (run > 1 ? $"{run} consecutive failures — nothing is being observed or scored while this persists."
+                         : "Nothing was observed or scored for this tick."));
+        }
+        catch { /* a diagnostic must never be the thing that breaks the loop */ }
     }
 
     private void OnObserved(SnapshotDelta delta)

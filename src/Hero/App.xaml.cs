@@ -329,6 +329,12 @@ public partial class App : Application
             return;
         }
 
+        // Installed here rather than later: everything below can throw, and a failure during
+        // start-up is exactly the one a user cannot diagnose — HERO never appears, and without
+        // this there is nothing written down to say why.
+        Core.CrashHandler.Install(line => HeroPaths.WriteUserLog("app.log", line));
+        Core.CrashHandler.InstallDispatcher(this);
+
         StartShowRequestListener();
 
         base.OnStartup(e);

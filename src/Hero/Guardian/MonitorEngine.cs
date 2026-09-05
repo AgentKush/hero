@@ -43,6 +43,23 @@ internal sealed class MonitorEngine : IAsyncDisposable
     internal Snapshot? Latest { get; private set; }
 
     /// <summary>
+    /// Polls that threw in a row, and when the last one did.
+    ///
+    /// COUNTED BECAUSE A FAULTED POLL OBSERVES NOTHING. The catch below keeps the loop alive, which
+    /// is right — one bad poll must not take the guardian down — but it also skips Observed, so
+    /// nothing is ingested or scored for that tick. A probe that fails every time therefore
+    /// produces a guardian that watches attentively, records nothing, and reports itself healthy,
+    /// which is the failure this product is least entitled to have.
+    ///
+    /// Reset by the first poll that succeeds, so this is "is it failing NOW" rather than a running
+    /// total of everything that has ever gone wrong.
+    /// </summary>
+    internal int ConsecutiveFaults { get; private set; }
+
+    /// <summary>When the most recent faulted poll happened, or null if none has.</summary>
+    internal DateTime? LastFaultUtc { get; private set; }
+
+    /// <summary>
     /// Installs a snapshot taken elsewhere and returns how it differs from the one before it.
     /// Used only when the dashboard is reading from the guardian service over IPC: in that mode
     /// this engine never polls, and every page still reads <see cref="Latest"/> exactly as it did
@@ -103,11 +120,14 @@ internal sealed class MonitorEngine : IAsyncDisposable
                 Latest = current;
                 previous = current;
 
+                ConsecutiveFaults = 0;
                 Observed?.Invoke(delta);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // A single bad poll must never take the guardian down.
+                ConsecutiveFaults++;
+                LastFaultUtc = DateTime.UtcNow;
                 Faulted?.Invoke(ex);
             }
         }

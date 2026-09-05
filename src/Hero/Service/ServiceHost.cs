@@ -5,14 +5,20 @@ namespace Hero.Service;
 /// <summary>
 /// The service side of HERO: what runs when the SCM launches HERO.exe with <c>--service</c>.
 ///
-/// This deliberately does NOT yet host the guardian engine. The reason is state, not effort.
-/// <c>HeroPaths</c> resolves to <c>LocalApplicationData</c>, which for LocalSystem is
-/// <c>C:\Windows\System32\config\systemprofile\AppData\Local\HERO</c> — a different directory
-/// from the signed-in user's. Starting the engine here today would give HERO two brains writing
-/// two baselines and two hash-chained ledgers, and a hash chain with two writers is not a hash
-/// chain. Moving that state to %ProgramData% and putting the UI on the other end of an IPC pipe
-/// is the next step; until then the service does the one job that needs no shared state and is
-/// the whole point of being a service in the first place: it watches HERO's own files.
+/// This hosts the guardian engine, and the move is the whole point of the service: detection runs
+/// in a process user-level malware cannot stop, and sees the machine with SYSTEM's reach.
+///
+/// It did not always, and this comment said so for a long time after it stopped being true — it
+/// described the design that state made impossible (two brains writing two baselines, a hash chain
+/// with two writers) and the plan to fix it. The plan happened: state moved to %ProgramData%, the
+/// UI moved to the other end of an IPC pipe, and <see cref="Guardian.GuardianService.Start"/> is
+/// called below. Leaving the old paragraph in place made this file's own summary the least
+/// reliable description of it in the repository.
+///
+/// The cost of that move is what the identity work exists to pay: everything profile-relative —
+/// HKCU, the Startup folder, %LOCALAPPDATA%, %TEMP% — means the service account here rather than
+/// the signed-in user, and resolves silently to the wrong place rather than failing. See
+/// <see cref="Core.UserHives"/>.
 /// </summary>
 internal static class ServiceHost
 {
@@ -74,6 +80,11 @@ internal static class ServiceHost
 
         try
         {
+            // Before anything that can throw. The SCM restarts a service that dies, so without a
+            // reason written first a crash loop is indistinguishable from a service being stopped
+            // and started — and the restart erases the evidence of the previous attempt.
+            Core.CrashHandler.Install(ServiceLog.Write);
+
             ServiceLog.Write($"HERO guardian service starting. pid {Environment.ProcessId}, " +
                              $"identity {Environment.UserName}.");
 

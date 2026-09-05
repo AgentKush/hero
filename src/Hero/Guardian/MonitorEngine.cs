@@ -121,16 +121,51 @@ internal sealed class MonitorEngine : IAsyncDisposable
                 previous = current;
 
                 ConsecutiveFaults = 0;
-                Observed?.Invoke(delta);
+
+                // A SUBSCRIBER MUST NOT BE ABLE TO KILL THE LOOP, and one could. Observed was
+                // invoked inside this try, so a handler that threw was treated as a failed poll and
+                // routed to Faulted — and if Faulted's handler then threw, that exception left the
+                // catch block below and ended the polling task outright. Silently: the task is
+                // fire-and-forget, so nothing observed the guardian stopping. Reproduced while
+                // instrumenting this loop from outside, where both handlers were foreign code.
+                //
+                // The loop's own work and its listeners' work are now separate failures, which they
+                // always were in fact.
+                Notify(delta);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // A single bad poll must never take the guardian down.
                 ConsecutiveFaults++;
                 LastFaultUtc = DateTime.UtcNow;
-                Faulted?.Invoke(ex);
+                RaiseFaulted(ex);
             }
         }
+    }
+
+    /// <summary>
+    /// Hands one poll to the listeners, absorbing anything they throw.
+    ///
+    /// A subscriber failing is the subscriber's problem, not a failed poll: the snapshot was taken,
+    /// Latest is already updated, and treating it as a poll failure would both misreport the
+    /// guardian's health and — before this existed — end the loop.
+    /// </summary>
+    private void Notify(SnapshotDelta delta)
+    {
+        try { Observed?.Invoke(delta); }
+        catch (Exception ex) { RaiseFaulted(ex); }
+    }
+
+    /// <summary>
+    /// Raises Faulted without letting a failing listener escape.
+    ///
+    /// This one is called from inside a catch block, so an exception leaving it is not caught by
+    /// anything and takes the polling task with it.
+    /// </summary>
+    private void RaiseFaulted(Exception ex)
+    {
+        try { Faulted?.Invoke(ex); }
+        catch { /* nowhere left to report to, and the loop must continue regardless */ }
     }
 
     private TimeSpan ChooseInterval(Snapshot last)

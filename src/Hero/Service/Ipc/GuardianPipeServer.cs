@@ -21,15 +21,22 @@ namespace Hero.Service.Ipc;
 ///     carries the Network SID rather than Interactive, so remote access is excluded by the same
 ///     rule rather than by a separate check that could be forgotten.
 ///
-/// The pipe is deliberately not a control channel yet — the operations it exposes are read-only.
-/// Commands that change state arrive when the guardian itself moves into the service, and each
-/// one will need its own argument validation; a pipe that can be opened by a user is not a pipe
-/// whose messages can be trusted just because the ACL is right.
+/// The pipe IS a control channel. It was not when this class was written — the comment here said
+/// so for a long time after it stopped being true, which is its own lesson — and the guardian
+/// moving into the service brought suspend, kill, quarantine and persistence removal with it.
+///
+/// So the ACL is the floor and not the answer. Every operation declares what a caller must hold in
+/// <see cref="GuardianProtocol.AccessFor"/>, and <see cref="Handle"/> enforces that before
+/// dispatch: an operation added without a row in that table is refused rather than published. A
+/// pipe a user can open is not a pipe whose messages can be trusted just because the ACL is right.
 /// </summary>
 internal sealed class GuardianPipeServer
 {
     private readonly CancellationTokenSource _stopping = new();
     private Task? _loop;
+
+    /// <summary>True once this process has successfully created the first instance of the pipe.</summary>
+    private bool _claimed;
 
     internal static DateTime StartedUtc { get; } = DateTime.UtcNow;
 
@@ -80,17 +87,35 @@ internal sealed class GuardianPipeServer
             NamedPipeServerStream? pipe = null;
             try
             {
+                // FirstPipeInstance on the FIRST instance only, which is what claims the name.
+                //
+                // Without it the service would happily join a pipe something else already owned:
+                // CreateNamedPipe succeeds as an additional instance, and the squatter — having
+                // created the name first — answers the connections it wins. Any process that can
+                // run before the service can therefore impersonate the guardian to the dashboard,
+                // feed it fabricated verdicts, and collect an impersonation token from every poll.
+                //
+                // With it, that arrangement fails loudly at startup instead: creation returns
+                // ERROR_ACCESS_DENIED, which the catch below logs. A guardian that cannot own its
+                // own channel must say so rather than quietly share it.
+                bool first = !_claimed;
+
                 pipe = NamedPipeServerStreamAcl.Create(
                     GuardianProtocol.PipeName,
                     PipeDirection.InOut,
                     GuardianProtocol.MaxServerInstances,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous,
+                    first ? PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance
+                          : PipeOptions.Asynchronous,
                     inBufferSize: 0,
                     outBufferSize: 0,
                     BuildSecurity(),
                     HandleInheritability.None,
                     additionalAccessRights: default);
+
+                // Only after a successful create: the name is now ours for as long as this process
+                // holds at least one instance, so later instances must not ask for it again.
+                _claimed = true;
 
                 await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
 
@@ -217,6 +242,21 @@ internal sealed class GuardianPipeServer
         {
             return GuardianProtocol.Serialise(new IpcResponse
             { Id = request?.Id ?? 0, Ok = false, Error = "Request had no operation." });
+        }
+
+        // AUTHORISATION BEFORE DISPATCH, from one table, for every operation — including the
+        // read-only ones, so that adding an operation without adding a row denies it rather than
+        // publishing it. The individual arms still make their own finer-grained checks; this is the
+        // floor none of them can be written to skip.
+        if (GuardianProtocol.AccessFor(request.Op) == GuardianProtocol.OpAccess.Elevated && !callerElevated)
+        {
+            return GuardianProtocol.Serialise(new IpcResponse
+            {
+                Id = request.Id,
+                Ok = false,
+                Error = $"'{request.Op}' changes how HERO defends this machine, or destroys data, so it " +
+                        "needs administrator rights. Run HERO as administrator and try again.",
+            });
         }
 
         try
@@ -358,12 +398,53 @@ internal sealed class GuardianPipeServer
         foreach (var item in list.EnumerateArray())
         {
             if (paths.Count >= Limit) break;
-            if (item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } path)
+            if (item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } path
+                && IsLocalFilePath(path))
                 paths.Add(path);
         }
 
         Guardian.GuardianService.Current.RequestVerification(paths);
         return new { queued = paths.Count };
+    }
+
+    /// <summary>
+    /// Whether a caller-supplied path is one the service may safely open.
+    ///
+    /// THE COUNT WAS BOUNDED AND THE CONTENT WAS NOT. Verification opens each path and reads it, as
+    /// LocalSystem — so a UNC path handed in here made the machine account authenticate to a server
+    /// of the caller's choosing. That is a coerced-authentication primitive: any signed-in user
+    /// could point the guardian at \\attacker\share and collect an NTLM exchange from the computer
+    /// account, which is a far more valuable credential than their own.
+    ///
+    /// A device path is refused for the same reason one step lower down — \\?\UNC\ and \\.\ reach
+    /// the same places while looking nothing like them — and a relative path is refused because
+    /// what it resolves against is the service's working directory, which is System32.
+    ///
+    /// This is a whitelist: rooted, local, no redirection. Signature verification has no business
+    /// anywhere else, and the paths a legitimate client sends all come from a snapshot the service
+    /// itself produced.
+    /// </summary>
+    private static bool IsLocalFilePath(string path)
+    {
+        var p = path.Trim();
+        if (p.Length < 3) return false;
+
+        // \\server\share, \\?\..., \\.\... — every form that leaves this machine or bypasses
+        // normalisation begins the same way.
+        if (p.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+
+        // A drive-relative path ("C:file") resolves against a per-drive current directory, which is
+        // not something a service should be resolving a caller's string against.
+        if (p[1] != ':' || p[2] != '\\') return false;
+        if (!char.IsAsciiLetter(p[0])) return false;
+
+        try
+        {
+            // Rejects the remaining shapes cheaply and without touching the disk: invalid
+            // characters, and anything Path cannot make sense of.
+            return Path.IsPathFullyQualified(p) && p.IndexOfAny(Path.GetInvalidPathChars()) < 0;
+        }
+        catch { return false; }
     }
 
     private static IntegrityReply Integrity()

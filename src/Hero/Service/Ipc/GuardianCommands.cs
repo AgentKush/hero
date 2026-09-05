@@ -50,7 +50,7 @@ internal static class GuardianCommands
             GuardianProtocol.OpRecheck => Recheck(guardian, args),
             GuardianProtocol.OpAct => Act(guardian, args, callerElevated),
             GuardianProtocol.OpSaveSettings => SaveSettings(guardian, args, callerElevated),
-            GuardianProtocol.OpSaveRawSetting => SaveRawSetting(guardian, args),
+            GuardianProtocol.OpSaveRawSetting => SaveRawSetting(guardian, args, callerElevated),
             GuardianProtocol.OpVaultRestore => VaultRestore(guardian, args, callerElevated),
             GuardianProtocol.OpVaultDelete => VaultDelete(guardian, args, callerElevated),
             GuardianProtocol.OpRescanPersistence => RescanPersistence(guardian),
@@ -338,23 +338,42 @@ internal static class GuardianCommands
         return outcome;
     }
 
+    /// <summary>Names an action the way the refusal message needs to read it.</summary>
+    private static string DescribeAction(string action) => action switch
+    {
+        "suspend" => "Freezing a running process",
+        "resume" => "Resuming a process HERO suspended",
+        "blocknetwork" => "Cutting a process off from the network",
+        "killtree" => "Terminating a process and everything it started",
+        "quarantine" => "Moving a file into the quarantine vault",
+        "removepersistence" => "Removing an auto-start entry",
+        _ => "That action",
+    };
+
     private static ResponseResult Perform(GuardianService guardian, Guardian.ResponseEngine engine,
                                           Subject subject, string action, string incident,
                                           string reason, bool callerElevated)
     {
+        // CONTAINMENT AND ITS REVERSAL SIT AT THE SAME LEVEL, and this is where that is enforced.
+        //
+        // Only "resume" used to be gated. So an unelevated caller over the pipe could suspend a
+        // process but not resume it, kill a tree, quarantine a binary and remove an autorun — while
+        // being refused every one of the operations that would undo those. The gate was on the
+        // wrong side of each pair: it stopped the repair and permitted the damage.
+        //
+        // Raising the containments to meet the reversals rather than lowering the reversals to meet
+        // them, because the alternative is an unprivileged caller directing a LocalSystem service to
+        // terminate process trees and move executables off disk. Every action here is performed by
+        // SYSTEM against a target the caller does not necessarily have rights to touch, which is the
+        // definition of the escalation HERO exists to report.
+        if (!callerElevated) return Refuse(DescribeAction(action));
+
         return subject switch
         {
             ProcessSubject p => action switch
             {
                 "suspend" => engine.Suspend(p.Process, incident, reason, userInitiated: true),
-
-                // Resume is containment REVERSAL. Its "always allowed - undoing containment is
-                // never gated" rule was written when the only caller was in-process, i.e. the user
-                // undoing their own click. Over the pipe it means any signed-in account can thaw a
-                // process HERO froze.
-                "resume" => callerElevated
-                    ? engine.Resume(p.Process.Pid)
-                    : Refuse("Resuming a process HERO suspended"),
+                "resume" => engine.Resume(p.Process.Pid),
                 "blocknetwork" => engine.BlockNetwork(p.Process, incident, reason, userInitiated: true),
                 "killtree" => engine.KillTree(p.Process, incident, reason, userInitiated: true),
                 "quarantine" => engine.Quarantine(p.Process.ImagePath, incident, reason, userInitiated: true),
@@ -400,7 +419,7 @@ internal static class GuardianCommands
     /// settings file, and an unrestricted key/value write would let any interactive process set
     /// arbitrary keys there — including, once the schema grows, ones that mean something.
     /// </summary>
-    private static CommandReply SaveRawSetting(GuardianService guardian, JsonElement? args)
+    private static CommandReply SaveRawSetting(GuardianService guardian, JsonElement? args, bool callerElevated)
     {
         string[] allowed = { "animationsEnabled", "resolveHostnames" };
 
@@ -413,6 +432,23 @@ internal static class GuardianCommands
             || raw.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
         {
             throw new InvalidOperationException("'value' must be true or false.");
+        }
+
+        // DIRECTIONAL, because the two directions are not the same request. resolveHostnames is
+        // the only thing in HERO that sends a packet, and the README's headline promise is that
+        // switching it off means HERO makes no network requests at all. An interactive caller may
+        // always keep that promise; undoing it re-enables the product's single egress on behalf of
+        // a user who deliberately turned it off, which is a change to how HERO behaves rather than
+        // a preference.
+        if (key == "resolveHostnames" && raw.GetBoolean() && !callerElevated)
+        {
+            return new CommandReply
+            {
+                Acted = false,
+                Refused = true,
+                Message = "Switching network name lookups back on needs administrator rights. " +
+                          "Turning them off does not — HERO will always let you make it quieter.",
+            };
         }
 
         Core.RawSettings.Write(key, raw.GetBoolean());

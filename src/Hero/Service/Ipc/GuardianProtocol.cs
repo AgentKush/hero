@@ -133,6 +133,72 @@ internal static class GuardianProtocol
     // 734,915 files and holding one of the four pipe instances open for the minutes that takes
     // would deny the pipe to everything else, including the guardian's own state polling.
 
+    // ---- authorisation
+
+    /// <summary>What a caller must hold before an operation is dispatched.</summary>
+    internal enum OpAccess
+    {
+        /// <summary>Any caller the pipe's ACL admits — that is, a signed-in interactive user.</summary>
+        Interactive,
+
+        /// <summary>An elevated administrator token, proved by impersonating the client.</summary>
+        Elevated,
+    }
+
+    /// <summary>
+    /// The authorisation table. One place, consulted by the dispatcher before anything runs.
+    ///
+    /// THIS REPLACES A PER-ARM CONVENTION THAT WAS APPLIED IN ONE DIRECTION ONLY. The command
+    /// surface's own doc comment names the problem exactly — "the pipe made 'the user' mean
+    /// 'anyone signed in'" — and that insight was then applied solely to the containment-REVERSAL
+    /// arms. resume, undo and vault.restore demanded an elevated caller; suspend, blocknetwork,
+    /// killtree, quarantine and removepersistence did not.
+    ///
+    /// The asymmetry was worse than either half alone. Suspend ungated and resume gated means any
+    /// signed-in account could freeze a process and then could not thaw it: not merely an
+    /// escalation but a denial of service with no way back, performed by LocalSystem on the
+    /// caller's behalf.
+    ///
+    /// So the rule is the pairing, stated once: A CALLER WHO CAN BREAK SOMETHING MUST BE ABLE TO
+    /// UNBREAK IT. Containment and its reversal sit at the same level, and because the reversals
+    /// were already elevated, the containments join them rather than the reversals being lowered.
+    /// Lowering them would have meant an unprivileged caller directing SYSTEM to terminate process
+    /// trees and move executables, which is the escalation HERO exists to detect.
+    ///
+    /// An unknown operation is Elevated, not Interactive. A table that fails open is not a table.
+    /// </summary>
+    internal static OpAccess AccessFor(string op) => op switch
+    {
+        // Read-only. These tell the caller about their own machine and change nothing.
+        OpPing or OpIntegrity or OpState or OpVerify => OpAccess.Interactive,
+
+        // HERO's own view of a finding: dismissing, un-dismissing, re-checking. Reversible by the
+        // same caller, and confined to what HERO displays rather than to what the machine does.
+        OpDismiss or OpUndismiss or OpRecheck => OpAccess.Interactive,
+
+        // Reads. Learning counts are the user's own responses to their own findings.
+        OpLearning or OpMaintenanceStatus => OpAccess.Interactive,
+
+        // Only ever makes HERO stricter, which is a direction an attacker has no use for.
+        OpLearningReset => OpAccess.Interactive,
+
+        // Two cosmetic-to-personal preferences, and the arm applies its own directional rule:
+        // switching the reverse-DNS lookup OFF is always allowed, switching it ON is not. Gating
+        // the whole operation would have demanded administrator rights to turn animations off.
+        OpSaveRawSetting => OpAccess.Interactive,
+
+        // Costs work but changes nothing, and the ten-minute sweep would do it anyway.
+        OpRescanPersistence => OpAccess.Interactive,
+
+        // Measuring reads sizes; cleaning deletes files. Only one of those is a question.
+        OpMaintenanceMeasure => OpAccess.Interactive,
+
+        // Everything below either alters the machine, weakens the guardian, or destroys data.
+        // OpAct is listed here for the op itself; the individual actions are checked again by
+        // GuardianCommands.Perform, because "act" covers both halves of every pair.
+        _ => OpAccess.Elevated,
+    };
+
     internal const string OpMaintenanceMeasure = "maintenance.measure";
     internal const string OpMaintenanceClean = "maintenance.clean";
     internal const string OpMaintenanceStatus = "maintenance.status";

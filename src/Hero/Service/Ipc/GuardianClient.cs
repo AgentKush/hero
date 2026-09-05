@@ -186,6 +186,9 @@ internal static class GuardianClient
                 ".", GuardianProtocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous,
                 System.Security.Principal.TokenImpersonationLevel.Impersonation);
 
+            // See ServerIsLocalSystem below, called immediately after connecting: the grant above is
+            // only defensible once the thing being granted to has been identified.
+
             // CONNECTING and ANSWERING get separate budgets, and conflating them was a real bug.
             //
             // One two-second deadline used to cover the whole exchange: connect, the service
@@ -207,6 +210,28 @@ internal static class GuardianClient
             using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             connectTimeout.CancelAfter(ConnectTimeout);
             await pipe.ConnectAsync(connectTimeout.Token).ConfigureAwait(false);
+
+            // WHO ANSWERED? Asked before a single byte is written, and this is the other half of
+            // the impersonation grant above.
+            //
+            // The comment above argues the grant is free "because the server is LocalSystem" — and
+            // nothing established that. A pipe name is not a principal: the guardian's name is
+            // unowned on a machine where the service was never installed, and briefly unowned
+            // across a service restart, so anything that creates it first is the server. Winning
+            // one connection was enough, because the tray latches into remote mode on its first
+            // successful ping and then polls that same channel every second for the life of the
+            // process — handing an impersonation token to the squatter each time, and rendering
+            // whatever verdicts it chose to invent.
+            //
+            // Verified against the SERVER PROCESS'S OWN TOKEN rather than the identity it reports
+            // in its ping reply, because a liar would report whatever was asked of it.
+            if (!ServerIsLocalSystem(pipe))
+            {
+                Core.HeroPaths.WriteUserLog("app.log",
+                    $"IPC: the process answering the guardian pipe (pid {ServerPid(pipe)}) is not " +
+                    "LocalSystem. Refusing to talk to it.");
+                return null;
+            }
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(deadline ?? ReplyTimeout);
@@ -233,5 +258,65 @@ internal static class GuardianClient
             // caller: no, the guardian did not tell me anything.
             return null;
         }
+    }
+
+    /// <summary>
+    /// Whether the process on the server end of <paramref name="pipe"/> is running as LocalSystem.
+    ///
+    /// The SID comes from the server process's own token, obtained from its PID. Deliberately not
+    /// from the ping reply's Identity field: that is the server describing itself, which is exactly
+    /// what a process pretending to be the guardian would do.
+    ///
+    /// PROCESS_QUERY_LIMITED_INFORMATION is the right access for this and is the reason it works at
+    /// all from an unelevated dashboard — the full QUERY_INFORMATION right would be refused against
+    /// a SYSTEM process, and asking for it would have made the honest case fail while leaving the
+    /// dishonest one to be caught by accident.
+    ///
+    /// Every failure is false. This decides whether to hand an impersonation token to a stranger,
+    /// so "I could not tell" and "no" have to be the same answer.
+    /// </summary>
+    private static bool ServerIsLocalSystem(NamedPipeClientStream pipe)
+    {
+        try
+        {
+            // THE PIPE'S OWNER, not the server process's token.
+            //
+            // Reading the token was the obvious approach and it does not work, which is worth
+            // recording because it looks like it should. Measured against the live service from an
+            // unelevated dashboard: GetNamedPipeServerProcessId succeeds, and
+            // OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) on that pid then fails with
+            // ERROR_ACCESS_DENIED — a standard user cannot open a SYSTEM service's process at all.
+            // Since the unelevated dashboard is the PRIMARY client, a check built that way refuses
+            // the legitimate service every time and takes the whole UI down with it.
+            //
+            // The owner of the pipe object answers the same question and is readable, because
+            // PipeAccessRights.Read includes ReadPermissions and the ACL grants Interactive users
+            // read. It is also the property that actually matters: a process cannot create an
+            // object owned by LocalSystem unless it is LocalSystem, so an unprivileged squatter's
+            // pipe carries the squatter's own SID. An attacker who could set SYSTEM as the owner
+            // would already be SYSTEM, at which point there is nothing left for this check to
+            // protect. Verified against the running service: S-1-5-18.
+            var security = pipe.GetAccessControl();
+
+            return security.GetOwner(typeof(System.Security.Principal.SecurityIdentifier))
+                       is System.Security.Principal.SecurityIdentifier owner
+                   && owner.IsWellKnown(System.Security.Principal.WellKnownSidType.LocalSystemSid);
+        }
+        catch
+        {
+            // Cannot read the owner, cannot trust the server. This gates whether to hand an
+            // impersonation token to a stranger, so "I could not tell" and "no" are the same answer.
+            return false;
+        }
+    }
+
+    /// <summary>The PID answering the pipe, for diagnostics only. Zero when it cannot be read.</summary>
+    private static uint ServerPid(NamedPipeClientStream pipe)
+    {
+        try
+        {
+            return Interop.Native.GetNamedPipeServerProcessId(pipe.SafePipeHandle, out uint pid) ? pid : 0;
+        }
+        catch { return 0; }
     }
 }

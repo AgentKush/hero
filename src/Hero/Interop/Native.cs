@@ -55,6 +55,16 @@ internal static class Native
     internal static extern int SHLoadIndirectString(
         string pszSource, System.Text.StringBuilder pszOutBuf, int cchOutBuf, IntPtr ppvReserved);
 
+    /// <summary>
+    /// The PID behind a named pipe's server end, so a client can establish WHO it is talking to.
+    ///
+    /// A pipe name is not a principal. Without this, the only thing a client knows about the
+    /// process answering it is what that process chose to say in its own reply.
+    /// </summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetNamedPipeServerProcessId(SafeHandle Pipe, out uint ServerProcessId);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
 

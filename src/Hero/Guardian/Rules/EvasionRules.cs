@@ -16,7 +16,17 @@ internal sealed record SecurityEvent(
     string Summary,
     string ServiceName,
     string ImagePath,
-    string Detail);
+    string Detail,
+
+    /// <summary>
+    /// For 7040 only: the start type the service was changed TO, taken from the event's own data
+    /// rather than from its rendered sentence.
+    ///
+    /// Carried separately because the direction of the change is the whole finding, and the
+    /// sentence cannot supply it — "changed from disabled to auto start" and "changed from auto
+    /// start to disabled" contain the same words. Empty for every other event id.
+    /// </summary>
+    string NewStartType = "");
 
 /// <summary>
 /// The event-log plane.
@@ -216,7 +226,7 @@ internal static class WindowsEventFeed
         string description = "";
         try { description = record.FormatDescription() ?? ""; } catch { /* provider metadata missing */ }
 
-        string serviceName = "", imagePath = "";
+        string serviceName = "", imagePath = "", newStartType = "";
         var properties = ReadProperties(record);
 
         switch (record.Id)
@@ -231,6 +241,11 @@ internal static class WindowsEventFeed
                 // and neither is guaranteed, so whichever is present is taken.
                 if (properties.Count > 3 && properties[3].Length > 0) serviceName = properties[3];
                 else if (properties.Count > 0) serviceName = properties[0];
+
+                // Property 1 is the old start type and 2 the new one. Verified against live
+                // records on this machine: ["Claude", "auto start", "disabled", "CoworkVMService"]
+                // and the same event in reverse, ["Claude", "disabled", "auto start", ...].
+                if (properties.Count > 2) newStartType = properties[2];
                 break;
         }
 
@@ -250,7 +265,8 @@ internal static class WindowsEventFeed
             KnownSoftware.Sanitise(Summarise(record.Id), 120),
             KnownSoftware.Sanitise(serviceName, 120),
             KnownSoftware.Sanitise(imagePath, 300),
-            KnownSoftware.Sanitise(detail, 400));
+            KnownSoftware.Sanitise(detail, 400),
+            KnownSoftware.Sanitise(newStartType, 60));
     }
 
     private static List<string> ReadProperties(EventRecord record)
@@ -506,10 +522,23 @@ internal sealed class ServiceStartTypeRule : IDetectionRule
             {
                 // Only a transition INTO disabled is evasion. A security service being ENABLED, or
                 // moved between demand and auto start, is servicing — and 7040 reports both
-                // directions with the same event id. The text test is deliberately fail-safe: on a
-                // non-English Windows the phrase will not match and the entry scores at the
-                // ordinary tier rather than the critical one, which is the right way to be wrong.
-                bool disabled = e.Detail.Contains("disabled", StringComparison.OrdinalIgnoreCase);
+                // directions with the same event id.
+                //
+                // THE COMMENT SAID THAT AND THE CODE DID NOT DO IT. The test was
+                // e.Detail.Contains("disabled"), and 7040 renders as "...was changed from <old> to
+                // <new>.", so the word appears whichever way the change went. Measured on this
+                // machine: "The start type of the Claude service was changed from disabled to auto
+                // start" — a service being switched ON — matched. For anything in SecurityServices
+                // that is 22 points at Critical, so RE-ENABLING Windows Defender was reported as
+                // evasion, and with autonomy live that is a finding HERO could act on.
+                //
+                // The direction is in the event's own data rather than its sentence: property 2 is
+                // the new start type, 1 is the old one. The strings are localised but the INDEX is
+                // not, which makes this correct on a non-English Windows where a sentence test
+                // never could be. The remaining language dependence is the word "disabled" itself,
+                // and it still fails the safe way — unrecognised means the ordinary tier, not the
+                // critical one.
+                bool disabled = e.NewStartType.Contains("disabled", StringComparison.OrdinalIgnoreCase);
                 bool security = disabled && SecurityServices.Contains(entry.Name);
                 yield return RuleKit.Emit(Id,
                     security ? "A security service was reconfigured" : "A service start type changed",

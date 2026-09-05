@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -34,6 +35,109 @@ internal static class GuardianClient
     private static readonly TimeSpan ReplyTimeout = TimeSpan.FromSeconds(20);
 
     private static int _nextId;
+
+    /// <summary>
+    /// Buffers for one framed reply, rented per call.
+    ///
+    /// THE READ PATH USED TO BE THE DASHBOARD'S LARGEST SOURCE OF GARBAGE, and this pool plus
+    /// <see cref="IpcResponse{T}"/> is what stopped it. Measured: the tray process grew from 97 MB
+    /// to 262 MB of private commit over six and a half hours with its window never once shown, at
+    /// roughly 26 MB an hour, while the service — same binary, same payload, same second-by-second
+    /// cadence — stayed flat. Nothing was being retained. The whole of that growth was churn.
+    ///
+    /// The old path materialised the same reply four times per poll, every copy far above the
+    /// 85,000-byte threshold that puts an allocation on the large object heap:
+    ///
+    ///   1. StreamReader.ReadLineAsync returned the reply as one UTF-16 string — 540 KB of JSON
+    ///      becomes a ~1.03 MB string. (Only the final string, not the builder chunks it was
+    ///      assembled from: StringBuilder caps a chunk at 8000 chars, so those are gen0.)
+    ///   2. Deserialize&lt;IpcResponse&gt;(string) then had to transcode that back to UTF-8, renting
+    ///      three bytes per char. THIS IS THE ONE THAT MATTERS, because ArrayPool&lt;byte&gt;.Shared
+    ///      refuses to pool anything over 1,048,576 bytes: past that it hands back a bare array
+    ///      and silently drops it on return. The cliff falls at a payload of 349,525 chars and an
+    ///      ordinary reply here is well past it, so a 1.2–1.6 MB buffer was allocated and
+    ///      abandoned every second with the pool structurally unable to help.
+    ///   3. Data being a JsonElement meant a second parse into a JsonDocument the caller never
+    ///      receives and so cannot dispose — its buffers are dropped, not returned.
+    ///   4. Deserialize&lt;T&gt; on that element wrote the subtree back out and parsed it a third time.
+    ///
+    /// Step 2 is also the answer to the obvious objection: the SERVICE serialises the same payload
+    /// at the same cadence from the same binary and stays flat. The difference is not how many
+    /// copies each side makes. It is that only the client made an above-the-ceiling, unpoolable
+    /// rent whose size moved with every poll.
+    ///
+    /// The large object heap is swept on gen2 collections but never compacted unless asked, and
+    /// this app sets no GC configuration at all. Sizes vary every poll as processes and sockets
+    /// come and go, which is the worst case for fragmentation: the hole left by a 1.03 MB string
+    /// will not host the next 1.07 MB one, so committed bytes ratchet upward while live bytes do
+    /// not. That is the shape of the measurement — steady commit growth, flat handle and thread
+    /// counts, and a working set that swings either way as Windows trims it.
+    ///
+    /// Reading UTF-8 bytes straight off the pipe keeps the payload in ONE buffer at its wire size,
+    /// which is a little over half what the UTF-16 string cost, and typing the envelope removes the
+    /// other three copies outright.
+    ///
+    /// A private pool rather than <see cref="ArrayPool{T}.Shared"/> for two reasons. The shared
+    /// pool's 1 MB ceiling is the exact cliff that made the old path so expensive, and a reply
+    /// scales with how many processes and sockets the machine has, so it is not a size this code
+    /// gets to assume stays small. And renting half a megabyte once a second out of the shared
+    /// pool's large buckets would evict whatever else in the process — WPF, System.Text.Json —
+    /// depends on them.
+    ///
+    /// What that costs, stated rather than glossed: unlike the shared pool, the one Create returns
+    /// does not release its buffers under GC pressure. Two arrays per bucket are held for the life
+    /// of the process. On this machine, where a reply fits the first rent and the growth ladder
+    /// never runs, that is one bucket and about 2 MB. It is NOT 2 MB in general, and saying so
+    /// would contradict the paragraph above: every rung the ladder climbs populates a bucket of its
+    /// own and none is ever released, so replies that settle around 3 MB park 2 × (1 + 2 + 4) =
+    /// 14 MB. That is the real number, and it is why <see cref="_frameHint"/> exists — converging
+    /// on the size this machine actually produces keeps the ladder from being climbed at all.
+    ///
+    /// The trade is deliberate either way: a stable buffer reused every second, in place of a fresh
+    /// unpoolable one allocated and thrown away every second.
+    ///
+    /// Buffers are also returned WITHOUT being cleared, which is the right default for cost but
+    /// worth naming in a security tool: a pooled buffer still holds the previous reply's image
+    /// paths and command lines until it is overwritten. Nothing leaves the process — this is the
+    /// same data, in the same address space, that the dashboard exists to display — and clearing a
+    /// megabyte every second to hide it from ourselves would be paying for nothing.
+    /// </summary>
+    private static readonly ArrayPool<byte> Frames =
+        ArrayPool<byte>.Create(maxArrayLength: MaxFrameBytes, maxArraysPerBucket: 2);
+
+    /// <summary>
+    /// Big enough that an ordinary reply needs no growth step at all. Measured on this machine at
+    /// 340 processes and 381 sockets, a state reply is ~540 KB on the wire, and ~330 KB once the
+    /// version gating in <see cref="StateAsync"/> has dropped the persistence inventory and the
+    /// recent-starts list. Starting here means the common case is one rent and one read.
+    /// </summary>
+    private const int InitialFrameBytes = 1 << 20;          // 1 MB
+
+    /// <summary>
+    /// Refusal point for a reply that never ends.
+    ///
+    /// The old code had no bound either — ReadLineAsync would grow until the process died — so this
+    /// is not a regression, but a client that has just satisfied itself the server is LocalSystem
+    /// should still not agree to allocate without limit on its say-so. 64 MB is two orders of
+    /// magnitude above the largest plausible reply, so nothing legitimate can reach it.
+    /// </summary>
+    private const int MaxFrameBytes = 64 << 20;             // 64 MB
+
+    /// <summary>
+    /// The largest buffer a reply has needed so far, and therefore the size the next read rents up
+    /// front. Only ever grows, and never past <see cref="MaxFrameBytes"/>.
+    ///
+    /// WITHOUT THIS, A MACHINE WHOSE REPLIES EXCEED THE FIRST RENT RE-PAYS THE COST THIS WHOLE
+    /// CHANGE EXISTS TO REMOVE. The growth ladder is per-call: a 3 MB reply rents 1 MB, copies it
+    /// into 2 MB, copies that into 4 MB — every poll, once a second, forever. Two large copies and
+    /// three rents to read one message. Remembering the size that worked turns the steady state
+    /// back into a single rent and a single read, which is the entire point.
+    ///
+    /// A plain int read and written under <see cref="Volatile"/> rather than a lock: concurrent
+    /// callers racing here can only mean one of them briefly rents a size that was already big
+    /// enough, and paying for a lock once a second to prevent that would cost more than it saves.
+    /// </summary>
+    private static int _frameHint = InitialFrameBytes;
 
     /// <summary>True when the service answered a ping. Never throws.</summary>
     internal static async Task<PingReply?> PingAsync(CancellationToken token = default)
@@ -238,25 +342,111 @@ internal static class GuardianClient
 
             var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
             using var writer = new StreamWriter(pipe, encoding, 8192, leaveOpen: true) { AutoFlush = true };
-            using var reader = new StreamReader(pipe, encoding, false, 8192, leaveOpen: true);
 
             int id = Interlocked.Increment(ref _nextId);
             await writer.WriteLineAsync(
                 GuardianProtocol.Serialise(new IpcRequest { Id = id, Op = op, Args = args })).ConfigureAwait(false);
 
-            string? line = await reader.ReadLineAsync(timeout.Token).ConfigureAwait(false);
-            if (string.IsNullOrEmpty(line)) return null;
+            // The request is tens of bytes and stays a string; the REPLY is the one that matters, and
+            // it is read as raw UTF-8 and parsed exactly once. See Frames above for the measurement.
+            byte[]? frame = null;
+            try
+            {
+                int length;
+                (frame, length) = await ReadFrameAsync(pipe, timeout.Token).ConfigureAwait(false);
 
-            var response = JsonSerializer.Deserialize<IpcResponse>(line, GuardianProtocol.Json);
-            if (response is null || !response.Ok || response.Data is null) return null;
+                // Zero is an empty line, negative is the pipe closing mid-frame. Both were
+                // string.IsNullOrEmpty(line) before, and both mean the same thing to the caller.
+                if (length <= 0) return null;
 
-            return response.Data.Value.Deserialize<T>(GuardianProtocol.Json);
+                var response = JsonSerializer.Deserialize<IpcResponse<T>>(
+                    new ReadOnlySpan<byte>(frame, 0, length), GuardianProtocol.Json);
+
+                return response is { Ok: true } ? response.Data : null;
+            }
+            finally
+            {
+                // Only if the read actually handed a buffer back. When it throws it has already
+                // returned its own, and returning the same array twice corrupts the pool.
+                if (frame is not null) Frames.Return(frame);
+            }
         }
         catch
         {
             // Absent service, refused ACL, timeout, malformed reply — all the same answer to the
             // caller: no, the guardian did not tell me anything.
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads one newline-framed message off the pipe as raw UTF-8, into a buffer the caller must
+    /// return to <see cref="Frames"/>.
+    ///
+    /// Length is the JSON only: the framing newline is excluded, and so is the carriage return in
+    /// front of it, because the other end writes with StreamWriter.WriteLineAsync and that emits
+    /// Environment.NewLine — "\r\n" on Windows. A negative length means the pipe closed before the
+    /// frame ended.
+    ///
+    /// Scanning for a single '\n' is the same framing StreamReader.ReadLineAsync applied here
+    /// before, and it is safe for the same reason the protocol has always relied on: the pipe is
+    /// PipeTransmissionMode.Byte, and GuardianProtocol.Serialise never writes indented JSON, so
+    /// every newline inside a payload is escaped to "\\n" by JSON string escaping.
+    /// </summary>
+    private static async Task<(byte[] Buffer, int Length)> ReadFrameAsync(
+        Stream pipe, CancellationToken token)
+    {
+        byte[] buffer = Frames.Rent(Volatile.Read(ref _frameHint));
+        int filled = 0;
+
+        try
+        {
+            while (true)
+            {
+                if (filled == buffer.Length)
+                {
+                    if (buffer.Length >= MaxFrameBytes)
+                    {
+                        throw new InvalidDataException(
+                            $"The guardian's reply passed {MaxFrameBytes >> 20} MB without ending.");
+                    }
+
+                    byte[] bigger = Frames.Rent(Math.Min(buffer.Length * 2, MaxFrameBytes));
+                    Array.Copy(buffer, bigger, filled);
+                    Frames.Return(buffer);
+                    buffer = bigger;
+                }
+
+                int read = await pipe.ReadAsync(buffer.AsMemory(filled), token).ConfigureAwait(false);
+                if (read == 0) return (buffer, -1);
+
+                // Only the bytes that just arrived: everything before `filled` was searched on a
+                // previous pass, and re-scanning it would make a long reply quadratic.
+                int newline = Array.IndexOf(buffer, (byte)'\n', filled, read);
+                filled += read;
+
+                if (newline < 0) continue;
+
+                // What the MESSAGE needed, never what the pool happened to hand out. Rent is
+                // allowed to return a buffer larger than asked for, and recording buffer.Length
+                // here made the hint ratchet: a 33-byte frame that landed in an oversized buffer
+                // raised the hint to that buffer's size, the next rent then came back larger
+                // still, and the harness watched it climb 1 → 2 → 4 → 8 → 16 → 32 MB. Left in,
+                // the dashboard would end up renting 64 MB to read half a megabyte.
+                if (filled > Volatile.Read(ref _frameHint))
+                {
+                    Volatile.Write(ref _frameHint, filled);
+                }
+
+                int length = newline;
+                if (length > 0 && buffer[length - 1] == (byte)'\r') length--;
+                return (buffer, length);
+            }
+        }
+        catch
+        {
+            Frames.Return(buffer);
+            throw;
         }
     }
 

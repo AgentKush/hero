@@ -297,11 +297,36 @@ internal sealed record IpcRequest
     public JsonElement? Args { get; init; }
 }
 
+/// <summary>
+/// The envelope as the SERVER writes it. <see cref="Data"/> is a <see cref="JsonElement"/> because
+/// the server holds an already-typed reply object and simply needs somewhere to put it.
+/// </summary>
 internal sealed record IpcResponse
 {
     public int Id { get; init; }
     public bool Ok { get; init; }
     public JsonElement? Data { get; init; }
+    public string? Error { get; init; }
+}
+
+/// <summary>
+/// The same envelope as the CLIENT reads it, with the payload typed rather than left as a
+/// <see cref="JsonElement"/>. Identical on the wire — same property names, same casing — so the
+/// server keeps writing <see cref="IpcResponse"/> and nothing about the protocol changes.
+///
+/// It exists because reading through the untyped envelope cost three passes over the payload
+/// instead of one, and at 540 KB a second that was the dashboard's largest source of garbage.
+/// A <c>JsonElement</c> obtained by deserialising a property is backed by a JsonDocument the
+/// caller never receives and therefore cannot dispose, so its buffers are dropped rather than
+/// returned to the pool; then <c>Deserialize&lt;T&gt;</c> on that element writes the whole subtree
+/// back out to another buffer and parses it a second time. Naming the payload type up front means
+/// System.Text.Json reads the bytes once, straight into <typeparamref name="T"/>.
+/// </summary>
+internal sealed record IpcResponse<T> where T : class
+{
+    public int Id { get; init; }
+    public bool Ok { get; init; }
+    public T? Data { get; init; }
     public string? Error { get; init; }
 }
 

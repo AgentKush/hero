@@ -371,6 +371,22 @@ public partial class App : Application
                     "this user and the guardian service is not answering.");
         }
 
+        // The logon registration is reconciled HERE, in the process it belongs to.
+        //
+        // It used to be done by the guardian, which under the service meant LocalSystem writing a
+        // run-at-logon entry into its own hive for an account that never logs on. Every mechanism
+        // involved is per-user, so only a process running as the signed-in person can get it right.
+        // This is that process — it is the one the Run key launches — so reconciling at its startup
+        // is also what heals a stale entry after the executable moves, one logon later.
+        //
+        // Off the startup path: it touches the registry and the Task Scheduler COM API, and the
+        // tray must appear whether or not either answers.
+        _ = Task.Run(() =>
+        {
+            try { Core.StartupRegistration.Reconcile(Core.HeroSettings.Current); }
+            catch { /* surfaced by the Settings page's own health read */ }
+        });
+
         _shell = CreateShell();
         _tray = new TrayIcon(
             onOpen: ShowShell,

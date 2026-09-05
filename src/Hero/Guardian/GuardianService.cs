@@ -295,10 +295,23 @@ internal sealed class GuardianService : IAsyncDisposable
         // discovered at the next reboot, which is precisely when nobody is watching. Off the
         // startup path because it touches the registry and the Task Scheduler COM API, and
         // nothing here depends on the result.
-        _ = Task.Run(() =>
+        // NOT WHEN THIS ENGINE IS THE SERVICE. Every mechanism StartupRegistration touches is
+        // per-user — the Run key under HKCU, the StartupApproved tombstone beside it, the Startup
+        // folder shortcut, the per-user scheduled task — and under LocalSystem all four resolve to
+        // the service account. Reconcile there wrote a run-at-logon entry for an account that never
+        // logs on, and left the user's real entry untouched; DisableAll had the mirror fault, so
+        // turning "start with Windows" OFF deleted nothing the user would ever see.
+        //
+        // The healing this exists for still happens, and happens in the right place: the tray app
+        // reconciles at its own startup, which is the process the Run key launches, running as the
+        // person the entry belongs to. See App.OnStartup.
+        if (!RunningAsSystem())
         {
-            try { Core.StartupRegistration.Reconcile(Settings); } catch { }
-        });
+            _ = Task.Run(() =>
+            {
+                try { Core.StartupRegistration.Reconcile(Settings); } catch { }
+            });
+        }
 
         Engine.Observed += OnObserved;
         Engine.Start();
@@ -566,6 +579,24 @@ internal sealed class GuardianService : IAsyncDisposable
     /// user can see the actions HERO wanted to take and judge whether it was right, rather than
     /// having to choose between "silent" and "armed" with no evidence either way.
     /// </summary>
+    /// <summary>
+    /// True when this engine is hosted by the LocalSystem service rather than by the tray app.
+    ///
+    /// IsSystem is exact — it tests for the LocalSystem SID rather than inferring from elevation or
+    /// from an interactive window station, both of which have exceptions. A failure to read the
+    /// token is treated as "this is the service", because the only thing gated on it is a per-user
+    /// registry write that is wrong to perform when uncertain.
+    /// </summary>
+    private static bool RunningAsSystem()
+    {
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            return identity.IsSystem;
+        }
+        catch { return true; }
+    }
+
     internal void ApplyAutonomy()
     {
         if (Response is null) return;

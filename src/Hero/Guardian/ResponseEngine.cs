@@ -1836,7 +1836,11 @@ internal sealed class ResponseEngine : IDisposable
         if (!vaulted.Success)
         {
             string message = vaulted.Message;
-            if (IsControlledFolderPath(path))
+
+            // Only when the vault has not ALREADY explained itself. An antivirus refusal and a
+            // Controlled Folder Access block are different events with different remedies, and
+            // stacking both explanations onto one failure leaves the user to guess which applies.
+            if (!vaulted.AntivirusBlocked && IsControlledFolderPath(path))
                 message += " Windows Defender's Controlled Folder Access is switched on and guards Desktop, Documents, Pictures, Videos, Music and Favourites. A quarantine is a move, and the move's first half is a delete from that folder, so Defender blocks it — that is Defender working correctly, not a HERO fault. To let HERO work there, add it under Windows Security > Virus & threat protection > Ransomware protection > Allow an app through Controlled folder access.";
 
             return Record(new ResponseResult
@@ -1896,21 +1900,30 @@ internal sealed class ResponseEngine : IDisposable
         }
     }
 
-    /// <summary>The six folders Controlled Folder Access guards. Verified enabled on this machine.</summary>
+    /// <summary>
+    /// Whether Controlled Folder Access is switched on AND guards the folder this path is in.
+    ///
+    /// Both halves were wrong. The folder set came from Environment.GetFolderPath, which inside the
+    /// LocalSystem service resolves under systemprofile — so the test could never match a real
+    /// Desktop or Documents, and the explanation it gates was unreachable in the shipping
+    /// configuration. And nothing ever probed whether the feature was actually enabled: the message
+    /// stated it as fact, so on a machine with CFA off it sent the user to a Windows Security page
+    /// to fix something that was not the problem.
+    ///
+    /// The feature check comes first because it is one registry read and settles it for every
+    /// path, while the folder walk is per user.
+    /// </summary>
     private static bool IsControlledFolderPath(string path)
     {
-        var guarded = new[]
-        {
-            Environment.SpecialFolder.Desktop, Environment.SpecialFolder.MyDocuments,
-            Environment.SpecialFolder.MyPictures, Environment.SpecialFolder.MyVideos,
-            Environment.SpecialFolder.MyMusic, Environment.SpecialFolder.Favorites,
-        };
+        if (!Core.UserHives.ControlledFolderAccessEnabled()) return false;
+
         string canonical = ProtectedSet.Canonicalise(path);
-        foreach (var f in guarded)
+        foreach (var user in Core.UserHives.Loaded())
         {
-            string dir;
-            try { dir = Environment.GetFolderPath(f); } catch { continue; }
-            if (ProtectedSet.Under(canonical, dir)) return true;
+            foreach (var dir in Core.UserHives.ControlledFolders(user))
+            {
+                if (dir.Length > 0 && ProtectedSet.Under(canonical, dir)) return true;
+            }
         }
         return false;
     }

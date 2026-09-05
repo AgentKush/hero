@@ -113,22 +113,47 @@ internal static class UserHives
     /// somewhere the convention does not predict. The conventional path is the last resort, not
     /// the first guess.
     /// </summary>
-    internal static string StartupFolder(UserHive user)
+    internal static string StartupFolder(UserHive user) =>
+        ShellFolder(user, "Startup", @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup");
+
+    /// <summary>
+    /// The six folders Controlled Folder Access guards, for one user.
+    ///
+    /// Resolved per user for the same reason as everything else here, and read from the shell
+    /// registration rather than assembled: Documents and Pictures are the two folders Windows most
+    /// often redirects into OneDrive, and a hand-built %USERPROFILE%\Documents would then name a
+    /// directory Defender is not guarding while missing the one it is.
+    /// </summary>
+    internal static IEnumerable<string> ControlledFolders(UserHive user)
     {
-        // Shell Folders holds the already-expanded path, which is why it is tried first: expanding
-        // the %USERPROFILE% in User Shell Folders would expand it in HERO's environment, and under
-        // the service that is the systemprofile directory all over again.
+        yield return ShellFolder(user, "Desktop", "Desktop");
+        yield return ShellFolder(user, "Personal", "Documents");
+        yield return ShellFolder(user, "My Pictures", "Pictures");
+        yield return ShellFolder(user, "My Video", "Videos");
+        yield return ShellFolder(user, "My Music", "Music");
+        yield return ShellFolder(user, "Favorites", "Favorites");
+    }
+
+    /// <summary>
+    /// One of a user's shell folders, by its registry value name.
+    ///
+    /// Shell Folders holds the already-expanded path, which is why it is tried first: expanding the
+    /// %USERPROFILE% in User Shell Folders would expand it in HERO's environment, and under the
+    /// service that is the systemprofile directory all over again.
+    /// </summary>
+    private static string ShellFolder(UserHive user, string valueName, string fallbackRelative)
+    {
         using (var shell = Open(user, RegistryView.Registry64,
                    @"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"))
         {
-            if (shell?.GetValue("Startup") is string { Length: > 0 } expanded)
+            if (shell?.GetValue(valueName) is string { Length: > 0 } expanded)
                 return expanded;
         }
 
         using (var unexpanded = Open(user, RegistryView.Registry64,
                    @"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"))
         {
-            if (unexpanded?.GetValue("Startup", null,
+            if (unexpanded?.GetValue(valueName, null,
                     RegistryValueOptions.DoNotExpandEnvironmentNames) is string { Length: > 0 } raw
                 && user.ProfilePath.Length > 0)
             {
@@ -137,9 +162,37 @@ internal static class UserHives
             }
         }
 
-        return user.ProfilePath.Length > 0
-            ? Path.Combine(user.ProfilePath, @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup")
-            : "";
+        return user.ProfilePath.Length > 0 ? Path.Combine(user.ProfilePath, fallbackRelative) : "";
+    }
+
+    /// <summary>
+    /// Whether Defender's Controlled Folder Access is actually switched on.
+    ///
+    /// HERO used to ASSERT it was, in a message shown to the user after a failed quarantine, on no
+    /// evidence beyond the path being inside a guarded folder. On a machine with the feature off
+    /// that sent the user to a Windows Security page to fix something that was not the problem,
+    /// and buried the real reason the move failed.
+    ///
+    /// 1 is enabled and 2 is audit-only, which blocks nothing — so only 1 counts. Policy wins over
+    /// the local setting when both are present, which is how a managed machine behaves.
+    /// </summary>
+    internal static bool ControlledFolderAccessEnabled()
+    {
+        const string Policy =
+            @"SOFTWARE\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\Controlled Folder Access";
+        const string Local =
+            @"SOFTWARE\Microsoft\Windows Defender\Windows Defender Exploit Guard\Controlled Folder Access";
+
+        foreach (var path in new[] { Policy, Local })
+        {
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(path);
+                if (key?.GetValue("EnableControlledFolderAccess") is int value) return value == 1;
+            }
+            catch { }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------ folder roots

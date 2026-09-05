@@ -42,7 +42,18 @@ internal sealed record QuarantineManifest
     [JsonIgnore] public string VaultFileName => Id + ".quarantined";
 }
 
-internal sealed record QuarantineResult(bool Success, string Message, QuarantineManifest? Manifest);
+internal sealed record QuarantineResult(bool Success, string Message, QuarantineManifest? Manifest)
+{
+    /// <summary>
+    /// True when Windows refused every handle because antivirus is already holding the file.
+    ///
+    /// Carried as a flag rather than left for the caller to infer from the message text, because
+    /// the caller has its own explanation to offer — Controlled Folder Access — and appending that
+    /// to an antivirus refusal gives the user two different reasons for one event, only one of
+    /// which is true.
+    /// </summary>
+    internal bool AntivirusBlocked { get; init; }
+}
 
 /// <summary>
 /// The quarantine vault.
@@ -196,7 +207,8 @@ internal sealed class QuarantineVault
                         "file, including the one a move needs, so it cannot execute and does not " +
                         "need quarantining by HERO. Remove it with a targeted Defender scan of its " +
                         "folder, or from Defender's own Protection History.",
-                        null);
+                        null)
+                    { AntivirusBlocked = true };
                 }
 
                 // Same-volume moves are a rename and normally succeed even when the content is

@@ -1135,7 +1135,26 @@ internal sealed class GuardianService : IAsyncDisposable
             // WinVerifyTrust calls.
             await _verifyGate.WaitAsync();
             try { foreach (var p in fresh) Verifier.Verify(p); }
-            finally { _verifyGate.Release(); }
+            finally
+            {
+                _verifyGate.Release();
+
+                // RELEASED WHEN THE WORK IS DONE. This set is a dedup for work IN FLIGHT, not a
+                // record of what has ever been verified — the verifier's own cache is that, and it
+                // keys on (path, length, write time) so it invalidates itself when a binary is
+                // replaced. Add-only, the two disagreed: the verifier correctly forgot an updated
+                // image, this set refused to ask about it again, and TryGetCached then returned
+                // null for that path for the life of the service.
+                //
+                // Which was not a quiet failure. A null signature was read as "not validly signed",
+                // so the baseline classified an ordinary application update as a signer break,
+                // stripped the entity's earned standing and latched SignerChanged — three findings
+                // from one unremoved string.
+                lock (_verifyQueued)
+                {
+                    foreach (var p in fresh) _verifyQueued.Remove(p);
+                }
+            }
         });
     }
 

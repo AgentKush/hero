@@ -1410,6 +1410,22 @@ internal sealed class Baseline
         bool sameSigner = nowValid && !string.IsNullOrEmpty(e.Signer) &&
                           string.Equals(e.Signer, sig!.Signer, StringComparison.OrdinalIgnoreCase);
 
+        // UNKNOWN IS NOT UNSIGNED, and conflating the two is what turned a verification gap into an
+        // accusation. sig is null when the verifier has no answer for this path — the queue has not
+        // reached it, or, until the queue was fixed, would never reach it again after the binary
+        // changed. Every branch below reads "not valid" from that null, so a path whose signature
+        // HERO had simply failed to re-read was classified as a signer break: earned standing
+        // stripped, SignerChanged latched, and the entity pinned at Observed for good.
+        //
+        // A file HERO cannot vouch for is not a file that has done something wrong. The bytes did
+        // change, so this is not None — it is a change of unknown provenance, recorded as the
+        // weakest kind and left for the next pass to classify properly once an answer exists.
+        if (sig is null)
+        {
+            e.WatchUntilUtc = nowUtc.AddHours(12);
+            return ChangeKind.UnsignedRewrite;
+        }
+
         ChangeKind kind;
         if (nowValid && (sameSigner || string.IsNullOrEmpty(e.Signer)))
         {
@@ -1421,6 +1437,14 @@ internal sealed class Baseline
                 // what happens every time Chrome, VS Code or the dotnet SDK updates.
                 kind = ChangeKind.VersionRollover;
                 e.UpdateGraceUntilUtc = nowUtc.AddHours(24);
+
+                // The break is OVER, so the mark comes off. SignerChanged was set and never
+                // cleared by anything, and Evaluate reads it to cap the entity at Observed — so a
+                // single break, including one caused by a signature HERO merely failed to read,
+                // held the entity there permanently. Clearing it needs the strongest evidence
+                // available and this is it: a currently valid signature, from the publisher this
+                // path has always carried, in a location the user cannot write to.
+                e.SignerChanged = false;
             }
             else
             {

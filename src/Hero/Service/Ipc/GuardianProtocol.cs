@@ -141,6 +141,18 @@ internal static class GuardianProtocol
         /// <summary>Any caller the pipe's ACL admits — that is, a signed-in interactive user.</summary>
         Interactive,
 
+        /// <summary>
+        /// The person physically at the machine: a caller in the active console session. An
+        /// elevated caller also satisfies this, from wherever they are.
+        ///
+        /// This is the level for containment. It is what separates "the owner clicking Quarantine
+        /// on their own desktop" — which must keep working without a UAC prompt, because HERO ships
+        /// asInvoker on purpose and a tool that prompts on every action teaches people to click
+        /// through prompts — from "some other account signed in at the same time", which is the
+        /// population the pipe's Interactive ACL silently admitted.
+        /// </summary>
+        ConsoleUser,
+
         /// <summary>An elevated administrator token, proved by impersonating the client.</summary>
         Elevated,
     }
@@ -160,10 +172,20 @@ internal static class GuardianProtocol
     /// caller's behalf.
     ///
     /// So the rule is the pairing, stated once: A CALLER WHO CAN BREAK SOMETHING MUST BE ABLE TO
-    /// UNBREAK IT. Containment and its reversal sit at the same level, and because the reversals
-    /// were already elevated, the containments join them rather than the reversals being lowered.
-    /// Lowering them would have meant an unprivileged caller directing SYSTEM to terminate process
-    /// trees and move executables, which is the escalation HERO exists to detect.
+    /// UNBREAK IT. Containment and its reversal sit at the same level, whatever that level is.
+    ///
+    /// That level is <see cref="OpAccess.ConsoleUser"/> rather than Elevated, and the distinction
+    /// is the point of the design. The escalation being closed is not "an unprivileged user acts"
+    /// — it is "an account that is not the one at the keyboard directs SYSTEM to act". Demanding
+    /// an administrator instead would close it too, and would also put a UAC prompt in front of the
+    /// product's main loop; HERO ships asInvoker deliberately, on the argument that a tray tool
+    /// which prompts constantly teaches people to click through prompts, and gating every
+    /// Quarantine click would have made that argument against itself.
+    ///
+    /// What that leaves, stated plainly: a hostile process running AS the console user still
+    /// passes. It already holds that user's rights, but not SYSTEM's, so the residue is real —
+    /// it can ask the guardian to reach targets its own token could not. Closing that needs the
+    /// client to prove intent rather than identity, which the pipe cannot do on its own.
     ///
     /// An unknown operation is Elevated, not Interactive. A table that fails open is not a table.
     /// </summary>
@@ -193,9 +215,18 @@ internal static class GuardianProtocol
         // Measuring reads sizes; cleaning deletes files. Only one of those is a question.
         OpMaintenanceMeasure => OpAccess.Interactive,
 
-        // Everything below either alters the machine, weakens the guardian, or destroys data.
-        // OpAct is listed here for the op itself; the individual actions are checked again by
-        // GuardianCommands.Perform, because "act" covers both halves of every pair.
+        // Containment and its reversal, at the same level — see the pairing rule above. Both halves
+        // reach targets the caller's own token may not, so both are the console user's to command.
+        OpAct or OpVaultRestore => OpAccess.ConsoleUser,
+
+        // Deletes real files, and the per-target NeedsAdmin and DestroysEvidence flags add their
+        // own elevation checks on top of this one inside MaintenanceHost.Clean.
+        OpMaintenanceClean => OpAccess.ConsoleUser,
+
+        // Everything below weakens the guardian's defence of the machine or destroys data with no
+        // reversal at all, so none of them is merely "the owner acting on their own desktop":
+        // allow adds a permanent exemption, settings.save can set autonomy to Observe, and
+        // vault.delete is the one operation in HERO that loses data outright.
         _ => OpAccess.Elevated,
     };
 

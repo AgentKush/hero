@@ -65,6 +65,23 @@ internal static class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetNamedPipeServerProcessId(SafeHandle Pipe, out uint ServerProcessId);
 
+    /// <summary>The PID at the client end of a pipe, so the server can place the caller.</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetNamedPipeClientProcessId(SafeHandle Pipe, out uint ClientProcessId);
+
+    /// <summary>The terminal-services session a process belongs to. Services live in session 0.</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ProcessIdToSessionId(uint dwProcessId, out uint pSessionId);
+
+    /// <summary>
+    /// The session physically attached to the machine, or 0xFFFFFFFF when the console is switched
+    /// between sessions. Changes with Fast User Switching, so it is read per connection.
+    /// </summary>
+    [DllImport("kernel32.dll")]
+    internal static extern uint WTSGetActiveConsoleSessionId();
+
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
 

@@ -152,6 +152,7 @@ internal sealed class GuardianPipeServer
                 // Established once per connection: a client cannot change identity mid-conversation,
                 // and impersonating on every line would be pure cost.
                 bool callerElevated = ClientIsElevatedAdministrator(pipe);
+                bool callerAtConsole = ClientIsAtTheConsole(pipe);
 
                 while (!token.IsCancellationRequested && pipe.IsConnected)
                 {
@@ -174,7 +175,7 @@ internal sealed class GuardianPipeServer
                     if (line is null) break;                    // client hung up
                     if (line.Length == 0) continue;
 
-                    string reply = Handle(line, callerElevated);
+                    string reply = Handle(line, callerElevated, callerAtConsole);
                     await writer.WriteLineAsync(reply).ConfigureAwait(false);
                 }
             }
@@ -225,7 +226,48 @@ internal sealed class GuardianPipeServer
     /// client must produce an error response, not take down the listener that every other client
     /// is sharing.
     /// </summary>
-    private static string Handle(string line, bool callerElevated)
+    /// <summary>
+    /// Whether the caller is signed in at the machine itself, as opposed to merely being one of the
+    /// interactive accounts the pipe's ACL admits.
+    ///
+    /// The Interactive SID is granted to every logged-on session — a second account left signed in
+    /// behind Fast User Switching, and an RDP session, both carry it. That is the population this
+    /// separates from the person actually sitting there.
+    ///
+    /// Session id rather than account SID, deliberately: it answers "is this the desktop the
+    /// machine is showing" without HERO having to decide which account owns the machine, and it
+    /// stays correct when the console switches to a different user, because the answer is read per
+    /// connection rather than cached.
+    ///
+    /// Every failure is false. It gates whether SYSTEM will act on a request, so an answer that
+    /// could not be established is no.
+    /// </summary>
+    private static bool ClientIsAtTheConsole(NamedPipeServerStream pipe)
+    {
+        try
+        {
+            uint console = Interop.Native.WTSGetActiveConsoleSessionId();
+
+            // 0xFFFFFFFF means no session is attached to the console — the switch-user screen, or
+            // a machine with no one physically signed in. Nobody is at the keyboard, so nobody
+            // qualifies.
+            if (console == 0xFFFFFFFF) return false;
+
+            // Session 0 is where services live and no interactive user can be. If the console ever
+            // reports it, something is wrong enough not to grant anything on the strength of it.
+            if (console == 0) return false;
+
+            if (!Interop.Native.GetNamedPipeClientProcessId(pipe.SafePipeHandle, out uint clientPid))
+                return false;
+            if (!Interop.Native.ProcessIdToSessionId(clientPid, out uint clientSession))
+                return false;
+
+            return clientSession == console;
+        }
+        catch { return false; }
+    }
+
+    private static string Handle(string line, bool callerElevated, bool callerAtConsole)
     {
         IpcRequest? request = null;
         try
@@ -248,14 +290,31 @@ internal sealed class GuardianPipeServer
         // read-only ones, so that adding an operation without adding a row denies it rather than
         // publishing it. The individual arms still make their own finer-grained checks; this is the
         // floor none of them can be written to skip.
-        if (GuardianProtocol.AccessFor(request.Op) == GuardianProtocol.OpAccess.Elevated && !callerElevated)
+        var required = GuardianProtocol.AccessFor(request.Op);
+        bool permitted = required switch
+        {
+            GuardianProtocol.OpAccess.Interactive => true,
+
+            // An elevated caller satisfies this from anywhere — an administrator working over RDP
+            // is not less entitled than the person at the desk, they have simply proved it a
+            // different way.
+            GuardianProtocol.OpAccess.ConsoleUser => callerAtConsole || callerElevated,
+
+            _ => callerElevated,
+        };
+
+        if (!permitted)
         {
             return GuardianProtocol.Serialise(new IpcResponse
             {
                 Id = request.Id,
                 Ok = false,
-                Error = $"'{request.Op}' changes how HERO defends this machine, or destroys data, so it " +
-                        "needs administrator rights. Run HERO as administrator and try again.",
+                Error = required == GuardianProtocol.OpAccess.ConsoleUser
+                    ? $"'{request.Op}' acts on this machine, so HERO only accepts it from the person " +
+                      "signed in at the machine itself. Another session cannot ask for it without " +
+                      "administrator rights."
+                    : $"'{request.Op}' changes how HERO defends this machine, or destroys data, so it " +
+                      "needs administrator rights. Run HERO as administrator and try again.",
             });
         }
 
@@ -271,7 +330,7 @@ internal sealed class GuardianPipeServer
                 // Everything else is a command. They share one entry point so that the rule they
                 // all obey — resolve the target through the verdict set, never trust the caller's
                 // — lives in exactly one place and cannot be forgotten by the next operation.
-                _ => GuardianCommands.Execute(request.Op, request.Args, callerElevated),
+                _ => GuardianCommands.Execute(request.Op, request.Args, callerElevated, callerAtConsole),
             };
 
             return GuardianProtocol.Serialise(new IpcResponse

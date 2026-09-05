@@ -120,6 +120,20 @@ internal static class MaintenanceHost
             };
         }
 
+        // A target marked NeedsAdmin is one the caller could not clean themselves. The flag existed
+        // and nothing here read it, so the service — running as SYSTEM — performed exactly the
+        // deletions the flag was raised to say the caller was not entitled to. The UI shows those
+        // rows as "needs admin" and offers to elevate, which is the honest path; without this the
+        // pipe was a way around the label the UI had already applied.
+        if (target.NeedsAdmin && !callerElevated)
+        {
+            return new MaintenanceJobReply
+            {
+                TargetId = targetId,
+                Message = "This one needs administrator rights. " + target.WhatBreaksIfWrong,
+            };
+        }
+
         lock (Gate)
         {
             if (_activeJobId is not null && Jobs.TryGetValue(_activeJobId, out var running) && !running.Finished)

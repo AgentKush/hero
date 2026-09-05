@@ -38,7 +38,13 @@ internal static class GuardianCommands
     /// the only thing separating "the user at the keyboard" from "the user at the keyboard who has
     /// deliberately consented to change how the guardian defends them".
     /// </param>
-    internal static object Execute(string op, JsonElement? args, bool callerElevated = false)
+    /// <param name="callerAtConsole">
+    /// Whether the client is signed in at the machine itself rather than in some other session the
+    /// pipe's Interactive ACL also admits. This is what containment is gated on — see
+    /// GuardianProtocol.AccessFor for why that rather than elevation.
+    /// </param>
+    internal static object Execute(string op, JsonElement? args,
+                                   bool callerElevated = false, bool callerAtConsole = false)
     {
         var guardian = GuardianService.Current;
 
@@ -338,35 +344,22 @@ internal static class GuardianCommands
         return outcome;
     }
 
-    /// <summary>Names an action the way the refusal message needs to read it.</summary>
-    private static string DescribeAction(string action) => action switch
-    {
-        "suspend" => "Freezing a running process",
-        "resume" => "Resuming a process HERO suspended",
-        "blocknetwork" => "Cutting a process off from the network",
-        "killtree" => "Terminating a process and everything it started",
-        "quarantine" => "Moving a file into the quarantine vault",
-        "removepersistence" => "Removing an auto-start entry",
-        _ => "That action",
-    };
-
     private static ResponseResult Perform(GuardianService guardian, Guardian.ResponseEngine engine,
                                           Subject subject, string action, string incident,
                                           string reason, bool callerElevated)
     {
-        // CONTAINMENT AND ITS REVERSAL SIT AT THE SAME LEVEL, and this is where that is enforced.
+        // CONTAINMENT AND ITS REVERSAL SIT AT THE SAME LEVEL, and the dispatcher has already
+        // established it: GuardianProtocol.AccessFor puts OpAct at ConsoleUser, and the pipe server
+        // refuses the request before it reaches here if the caller is neither at the console nor
+        // elevated.
         //
-        // Only "resume" used to be gated. So an unelevated caller over the pipe could suspend a
-        // process but not resume it, kill a tree, quarantine a binary and remove an autorun — while
-        // being refused every one of the operations that would undo those. The gate was on the
-        // wrong side of each pair: it stopped the repair and permitted the damage.
+        // Only "resume" used to be gated, which put the gate on the wrong side of every pair: an
+        // unelevated caller could suspend a process but not resume it, kill a tree, quarantine a
+        // binary and remove an autorun — while being refused each operation that would undo those.
+        // It stopped the repair and permitted the damage.
         //
-        // Raising the containments to meet the reversals rather than lowering the reversals to meet
-        // them, because the alternative is an unprivileged caller directing a LocalSystem service to
-        // terminate process trees and move executables off disk. Every action here is performed by
-        // SYSTEM against a target the caller does not necessarily have rights to touch, which is the
-        // definition of the escalation HERO exists to report.
-        if (!callerElevated) return Refuse(DescribeAction(action));
+        // Nothing further is checked here, deliberately. A second, subtly different rule at the
+        // point of use is how the first one came to be applied in one direction only.
 
         return subject switch
         {

@@ -220,9 +220,24 @@ internal sealed class PeerAssessor
 
         _ = Task.Run(async () =>
         {
+            // THE LOOKUP IS HELD IN A LOCAL, AND ITS FAULT IS OBSERVED SEPARATELY, because
+            // WaitAsync does not cancel what it stops waiting for. On timeout the proxy faults with
+            // TimeoutException — which the catch below handles — while the real DNS task carries on
+            // and faults a moment later with nobody listening. A faulted task nobody observes is
+            // rethrown on the finalizer thread, so every one of them arrived as
+            // "*** UNHANDLED EXCEPTION (unobserved task) ***" in service.log, complete with a stack
+            // trace, for what is simply an address with no PTR record.
+            //
+            // Measured on this machine after the guardian moved into the service: roughly twenty a
+            // minute against 165 live sockets, 188 of them in the first nine minutes of uptime. It
+            // reads as a service in trouble and it is nothing of the kind.
+            var lookup = Dns.GetHostEntryAsync(address);
+            _ = lookup.ContinueWith(static t => _ = t.Exception,
+                                    TaskContinuationOptions.OnlyOnFaulted |
+                                    TaskContinuationOptions.ExecuteSynchronously);
             try
             {
-                var entry = await Dns.GetHostEntryAsync(address).WaitAsync(TimeSpan.FromSeconds(3));
+                var entry = await lookup.WaitAsync(TimeSpan.FromSeconds(3));
                 _hostnames[key] = string.IsNullOrWhiteSpace(entry.HostName) ? key : entry.HostName;
             }
             catch

@@ -4,7 +4,8 @@ Everything in this file was **measured on the target machine**, not recalled. Wh
 decision depends on platform behaviour, it must cite a fact from here rather than an assumption.
 
 Machine: Windows 11 Pro build 26200 (x64) · i9-12900K (16C/24T) · 63.8 GB RAM
-Toolchain: .NET SDK 10.0.303, WindowsDesktop runtime 10.0.11 · PowerShell 7.6.5 · winget 1.29.290
+Toolchain: .NET SDK 10.0.401, WindowsDesktop runtime 10.0.11 · PowerShell 7.6.6 · winget 1.29.290
+(SDK and PowerShell re-read 2026-09-25; the line previously said 10.0.303 / 7.6.5.)
 Measured unelevated (the default HERO runs in).
 
 ---
@@ -234,97 +235,27 @@ because each looks harmless alone.
 
 ## 13. Environment notes
 
-- **~~Git Bash is broken on this machine~~ — FIXED 2026-09-25. Bash is usable; the cause was
-  Mandatory ASLR, not Git.** The original entry stands as a record of the symptom
-  (`fork: Resource temporarily unavailable`, exit `0xC0000142`) and was correct for as long as
-  it stood. It was not a Git fault and not specific to this repo. See below.
-
-  **Cause.** Exploit Protection had `ASLR.ForceRelocateImages` (Mandatory ASLR) **ON**
-  system-wide. MSYS2 emulates `fork()` by requiring `msys-2.0.dll` at the *same* base address in
-  parent and child; forced relocation makes that impossible, so every child died before `main`
-  with `STATUS_DLL_INIT_FAILED`.
-
-  **Why it hit MSYS and nothing else.** Measured by reading PE `DllCharacteristics` on this
-  machine, not from documentation:
-
-  ```
-  Git\usr\bin\bash.exe, cat.exe, sed.exe        0x8000  DYNAMIC_BASE=False
-  System32\find|sort|tar|timeout|whoami
-           |hostname|expand|reset .exe           0xC160  DYNAMIC_BASE=True, HIGH_ENTROPY_VA=True
-  ```
-
-  `ForceRelocateImages` only forces relocation on images built **without** `/DYNAMICBASE`, which
-  is why the System32 binaries sharing those names are unaffected: they opt into ASLR natively,
-  so the exemption is a **no-op** for Windows. That is what made the fix safe, and why the first
-  read of the problem -- which assumed those collisions carried real security cost and declined
-  to act -- was wrong.
-
-  Confirmed behaviourally rather than inferred from the header: `System32\timeout.exe`, which
-  now carries a `ForceRelocateImages` exemption, still loads at `0x7FF718C90000` against a
-  preferred `ImageBase` of `0x140000000`. Ordinary ASLR relocates it regardless. The exemption
-  removed nothing.
-
-  **Not every Git binary needed it.** 242 of the 301 `.exe` under
-  `Git\{usr\bin,bin,mingw64\bin}` are `0x8000` with no `DYNAMIC_BASE`; the other 59 already had
-  it and were exempted for nothing. Including, confusingly, one of the two `bash.exe` images:
-  `usr\bin\bash.exe` is `0x8000` (the one that matters, and the one quoted above) while
-  `bin\bash.exe` is `0x8160`, `DYNAMIC_BASE=True`. There is no `curl.exe` on the Git side at all
-  except `mingw64\bin\curl.exe` at `0x0160`, so of the nine name collisions only eight were ever
-  load-bearing.
-
-  **The diagnostic that isolates it**, if it ever recurs: from Git Bash a non-MSYS child works
-  while every MSYS child dies.
-
-  ```
-  $(cmd.exe //c echo hi)  ->  hi          # general process creation is fine
-  $(echo piped | cat)     ->  (empty)     # MSYS child
-  /usr/bin/cat /dev/null; echo $?  ->  127
-  ```
-
-  The doubled slash is not a typo and the control line is worthless without it: MSYS rewrites a
-  lone `/c` into a Windows path, so `cmd.exe /c echo hi` never receives the switch, launches
-  interactively and returns its banner instead of `hi`. `MSYS_NO_PATHCONV=1 cmd.exe /c echo hi`
-  works too.
-
-  **Fix applied 2026-09-25:** 286 per-image `ForceRelocateImages` exemptions across
-  `C:\Program Files\Git\{usr\bin,bin,mingw64\bin}`, 0 failures. **System-wide
-  `ForceRelocateImages` remains ON** — only per-image exemptions were added. Scripts and the
-  reversal record live in `D:\My projects\tools\aslr\`.
-
-  Verified after: `echo $(echo piped | cat) $(date +%Y)` -> `piped 2026`; pipes, `sed`, `grep`,
-  `awk` and nested command substitution all work.
-
-  **Residual note 1: LOGIN shells emit 13 lines of post-install noise, 4 of them on STDOUT.**
-  Git's post-install scripts can finally *attempt* to run and cannot delete themselves without
-  admin, so `/etc/profile` re-runs them every time. Measured:
-
-  ```
-  bash -lc 'echo MARKER'   ->  14 lines   (13 noise + MARKER)
-  bash -c  'echo MARKER'   ->   1 line    (clean)
-  ```
-
-  **This is not merely cosmetic, which an earlier version of this note got wrong.** Nine lines
-  are permission-denied on stderr, but four are `cp` verbose lines on **stdout**
-  (`'C:\WINDOWS\system32\drivers\etc\hosts' -> '/etc/hosts'` and three more). Any
-  `X=$(bash -lc '...')` capture is silently polluted with those four. Use a non-login `bash -c`
-  where the output is consumed. Claude Code's Bash tool uses a login shell, which is why it
-  shows on every tool call there. Letting an elevated Git Bash complete the post-install should
-  clear it; **not measured**, because verifying it mutates machine state.
-
-  **Residual note 2: exempting `bash.exe` alone is not sufficient.** IFEO matches on image
-  *name*, so every MSYS child (`cat`, `sed`, `grep`, `date`, ...) needs its own exemption.
+- **~~Git Bash is broken on this machine~~ — FIXED 2026-09-25.** The cause was Mandatory ASLR,
+  not Git. Full diagnosis, the measurements behind it, the reversal and the residual gotchas are
+  in **§39**; this entry stays as the pointer, because the original note sent readers to
+  PowerShell for months.
 
 - **Windows PowerShell 5.1 and PowerShell 7 resolve execution policy from different stores, and
-  it is not two registry keys.** Measured 2026-09-25: 5.1 reads
-  `HKLM\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell`, which was `Undefined`
-  (-> Restricted) and blocked a local unsigned `.ps1`. pwsh 7 here is the **MSIX/Store build
-  (7.6.6)**, which cannot write HKLM and **does not use the registry at all**: its `RemoteSigned`
-  comes from `$PSHOME\powershell.config.json`
-  (`{"Microsoft.PowerShell:ExecutionPolicy": "RemoteSigned"}`). `HKLM\SOFTWARE\Microsoft\PowerShellCore`
-  does not exist on this machine -- an earlier version of this bullet sent readers looking for it.
-  The consequence is unchanged and is the point: a script that "should run" per one shell is
-  blocked in the other. Use `powershell -NoProfile -ExecutionPolicy Bypass -File ...`, which is
-  per-process and stores nothing.
+  it is not two registry keys.** Measured 2026-09-25. 5.1's key
+  `HKLM\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell` holds **no
+  `ExecutionPolicy` value at all** (`GetValueNames()` returns only `Path`), so 5.1 falls back to
+  `Undefined` -> Restricted and refused a local, unsigned, MOTW-free `.ps1`:
+  *"running scripts is disabled on this system"*, exit 1. pwsh 7 (7.6.6, the MSIX/Store build)
+  ran the identical file, exit 0, and reports `RemoteSigned` from
+  `$PSHOME\powershell.config.json` (`{"Microsoft.PowerShell:ExecutionPolicy": "RemoteSigned"}`).
+  `HKLM\SOFTWARE\Microsoft\PowerShellCore` does not exist here -- an earlier version of this
+  bullet sent readers looking for it. What was **not** measured, so do not rely on it: whether an
+  MSIX build is *unable* to write HKLM. PS7 does still consult
+  `HKLM\SOFTWARE\Policies\Microsoft\PowerShellCore` for group policy; that key is absent on this
+  machine, so the path was never exercised.
+  The consequence is the point: a script that "should run" per one shell is blocked in the other.
+  Use `powershell -NoProfile -ExecutionPolicy Bypass -File ...`, which is per-process and stores
+  nothing.
 - `dotnet new sln` produces **`.slnx`** (XML) on SDK 10, not `.sln`.
 - The build creates transient `Hero_<hash>_wpftmp.csproj` projects; errors are reported against
   those names. This is normal WPF behaviour, not a project misconfiguration.
@@ -2214,3 +2145,98 @@ service on this machine, 17 of 336 would clear the reporting threshold -- and th
 third-party software (CCleaner, Cloudflare WARP, TeamViewer, AMD), which is precisely what a rule
 called "a new service was installed" is for. In-box services sit below it. This buys reach without
 buying noise.
+
+## 39. Git Bash was broken by Mandatory ASLR, not by Git
+
+Measured 2026-09-25. §13 told every reader for months to use PowerShell for all tooling because
+"Git Bash is broken on this machine". True as a symptom (`fork: Resource temporarily unavailable`,
+exit `0xC0000142`), wrong as a diagnosis, and it shaped how work got done in this repo.
+
+### Cause
+
+Exploit Protection had `ASLR.ForceRelocateImages` (Mandatory ASLR) **ON** system-wide. MSYS2
+emulates `fork()` by requiring `msys-2.0.dll` at the *same* base address in parent and child;
+forced relocation makes that impossible, so every child died before `main` with
+`STATUS_DLL_INIT_FAILED`. Nothing was wrong with Git.
+
+### Why it hit MSYS and nothing else
+
+Read from PE `DllCharacteristics` on this machine, verified two independent ways (a hand PE parse
+at `e_lfanew+24+0x46`, and `System.Reflection.PortableExecutable.PEReader`):
+
+```
+Git\usr\bin\bash.exe, cat.exe, sed.exe        0x8000  DYNAMIC_BASE=False
+System32\find|sort|tar|timeout|whoami
+         |hostname|expand|reset .exe           0xC160  DYNAMIC_BASE=True, HIGH_ENTROPY_VA=True
+```
+
+`ForceRelocateImages` only forces relocation on images built **without** `/DYNAMICBASE`. The
+System32 binaries sharing those names opt into ASLR natively, so exempting the name is a **no-op**
+for Windows. That is what made the fix safe, and why the first read of the problem — which assumed
+those collisions carried real security cost and declined to act — was wrong.
+
+Confirmed behaviourally rather than inferred: `System32\timeout.exe`, which now carries a
+`ForceRelocateImages` exemption, still loads at `0x7FF718C90000` against a preferred `ImageBase`
+of `0x140000000`. Ordinary ASLR relocates it regardless. The exemption removed nothing.
+
+**Not every Git binary needed it.** Of the 301 `.exe` under `Git\{usr\bin,bin,mingw64\bin}`, 242
+are `0x8000` with no `DYNAMIC_BASE`. The remaining 59 files — 58 unique names, 57 of them in the
+applied list — already had `DYNAMIC_BASE` and gained nothing. (Files and names differ here, and
+the distinction matters because IFEO keys are per **name**.) That includes one of the two
+`bash.exe` images: `usr\bin\bash.exe` is `0x8000`, the one that mattered, while `bin\bash.exe` is
+`0x8160`. And there is no `curl.exe` on the Git side except `mingw64\bin\curl.exe` at `0x0160`, so
+of the nine name collisions only **eight** were ever load-bearing.
+
+### The diagnostic, if it recurs
+
+A non-MSYS child works while every MSYS child dies:
+
+```
+$(cmd.exe //c echo hi)  ->  hi          # general process creation is fine
+$(echo piped | cat)     ->  (empty)     # MSYS child
+/usr/bin/cat /dev/null; echo $?  ->  127
+```
+
+The doubled slash is not a typo and the control line is worthless without it: MSYS rewrites a lone
+`/c` into a Windows path, so `cmd.exe /c echo hi` never receives the switch, starts interactively
+and returns its banner. `MSYS_NO_PATHCONV=1 cmd.exe /c echo hi` works too. This was true before
+the ASLR fix as well — it is an argument-conversion quirk, unrelated to the bug it diagnoses.
+
+### The fix, and what the reversal does not cover
+
+286 per-image `ForceRelocateImages` exemptions across `C:\Program Files\Git\{usr\bin,bin,mingw64\bin}`,
+0 failures. **System-wide `ForceRelocateImages` remains ON** — only per-image exemptions were
+added. Scripts and the record are in `D:\My projects\tools\aslr\`.
+
+**The live count is 287, not 286, and the undo is therefore incomplete.** `bash.exe` was exempted
+by hand while diagnosing, before the bulk run, so it is **not** in `applied-exemptions.json` and
+`undo-msys-aslr.ps1` will not reverse it. Remove it separately with
+`Set-ProcessMitigation -Name bash.exe -Remove` if a full revert is ever wanted. (`ssh-agent.exe`
+also carries an entry and is correctly excluded — Windows shipped that one.)
+
+Verified after: `echo $(echo piped | cat) $(date +%Y)` -> `piped 2026`; pipes, `sed`, `grep`, `awk`
+and nested command substitution all work.
+
+### Residual: login shells emit 13 lines of noise, 4 of them on STDOUT
+
+Git's post-install scripts can finally *attempt* to run and cannot delete themselves without admin,
+so `/etc/profile` re-runs them every time:
+
+```
+bash -lc 'echo MARKER'   ->  14 lines   (13 noise + MARKER)
+bash -c  'echo MARKER'   ->   1 line    (clean)
+```
+
+**This is not cosmetic.** Nine lines are permission-denied on stderr, but four are `cp` verbose
+lines on **stdout** (`'C:\WINDOWS\system32\drivers\etc\hosts' -> '/etc/hosts'` and three more), so
+any `X=$(bash -lc '...')` capture is silently polluted. Use a non-login `bash -c` where the output
+is consumed. Claude Code's Bash tool uses a login shell, which is why it shows on every call there.
+
+Letting an elevated Git Bash complete the post-install should clear it. **Not measured** — testing
+it mutates machine state.
+
+### And exempting `bash.exe` alone is not sufficient
+
+IFEO matches on image **name**, so every MSYS child (`cat`, `sed`, `grep`, `date`, ...) needs its
+own exemption. Exempting only `bash.exe` fixes bash's own `fork()` — subshells work — while every
+child still dies, which reads as a partial fix and is the most confusing state to stop in.

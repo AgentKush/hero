@@ -249,24 +249,42 @@ because each looks harmless alone.
 
   ```
   Git\usr\bin\bash.exe, cat.exe, sed.exe        0x8000  DYNAMIC_BASE=False
-  System32\curl|find|sort|tar|timeout|whoami
+  System32\find|sort|tar|timeout|whoami
            |hostname|expand|reset .exe           0xC160  DYNAMIC_BASE=True, HIGH_ENTROPY_VA=True
   ```
 
-  `ForceRelocateImages` only forces relocation on images built **without** `/DYNAMICBASE`. The
-  MSYS binaries are exactly that legacy case. The System32 binaries opt into ASLR natively, so
-  the nine names IFEO shares between them are a **no-op** for Windows — that is what made the
-  fix safe, and it is why the earlier assumption that those collisions carried real security
-  cost was wrong.
+  `ForceRelocateImages` only forces relocation on images built **without** `/DYNAMICBASE`, which
+  is why the System32 binaries sharing those names are unaffected: they opt into ASLR natively,
+  so the exemption is a **no-op** for Windows. That is what made the fix safe, and why the first
+  read of the problem -- which assumed those collisions carried real security cost and declined
+  to act -- was wrong.
+
+  Confirmed behaviourally rather than inferred from the header: `System32\timeout.exe`, which
+  now carries a `ForceRelocateImages` exemption, still loads at `0x7FF718C90000` against a
+  preferred `ImageBase` of `0x140000000`. Ordinary ASLR relocates it regardless. The exemption
+  removed nothing.
+
+  **Not every Git binary needed it.** 242 of the 301 `.exe` under
+  `Git\{usr\bin,bin,mingw64\bin}` are `0x8000` with no `DYNAMIC_BASE`; the other 59 already had
+  it and were exempted for nothing. Including, confusingly, one of the two `bash.exe` images:
+  `usr\bin\bash.exe` is `0x8000` (the one that matters, and the one quoted above) while
+  `bin\bash.exe` is `0x8160`, `DYNAMIC_BASE=True`. There is no `curl.exe` on the Git side at all
+  except `mingw64\bin\curl.exe` at `0x0160`, so of the nine name collisions only eight were ever
+  load-bearing.
 
   **The diagnostic that isolates it**, if it ever recurs: from Git Bash a non-MSYS child works
   while every MSYS child dies.
 
   ```
-  $(cmd.exe /c echo hi)   ->  hi          # general process creation is fine
+  $(cmd.exe //c echo hi)  ->  hi          # general process creation is fine
   $(echo piped | cat)     ->  (empty)     # MSYS child
   /usr/bin/cat /dev/null; echo $?  ->  127
   ```
+
+  The doubled slash is not a typo and the control line is worthless without it: MSYS rewrites a
+  lone `/c` into a Windows path, so `cmd.exe /c echo hi` never receives the switch, launches
+  interactively and returns its banner instead of `hi`. `MSYS_NO_PATHCONV=1 cmd.exe /c echo hi`
+  works too.
 
   **Fix applied 2026-09-25:** 286 per-image `ForceRelocateImages` exemptions across
   `C:\Program Files\Git\{usr\bin,bin,mingw64\bin}`, 0 failures. **System-wide
@@ -276,19 +294,37 @@ because each looks harmless alone.
   Verified after: `echo $(echo piped | cat) $(date +%Y)` -> `piped 2026`; pipes, `sed`, `grep`,
   `awk` and nested command substitution all work.
 
-  **Two residual notes.** Every Bash invocation now emits ~12 lines of `/etc` permission-denied
-  noise — Git's post-install scripts can finally *attempt* to run but cannot delete themselves
-  without admin; commands still succeed, and launching Git Bash once as Administrator clears it.
-  And exempting `bash.exe` alone is **not** sufficient: IFEO matches on image *name*, so every
-  MSYS child (`cat`, `sed`, `grep`, `date`, ...) needs its own exemption.
+  **Residual note 1: LOGIN shells emit 13 lines of post-install noise, 4 of them on STDOUT.**
+  Git's post-install scripts can finally *attempt* to run and cannot delete themselves without
+  admin, so `/etc/profile` re-runs them every time. Measured:
 
-- **Windows PowerShell 5.1 and PowerShell 7 store execution policy in different registry keys.**
-  `HKLM\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell` vs PowerShellCore's own
-  path. Measured 2026-09-25: 5.1 read `Undefined` (-> Restricted, blocking a local unsigned
-  `.ps1`) while `Get-ExecutionPolicy -List` under pwsh 7 reported `RemoteSigned` for
-  LocalMachine. A script that "should run" per one shell is blocked in the other. Use
-  `powershell -NoProfile -ExecutionPolicy Bypass -File ...`, which is per-process and stores
-  nothing.
+  ```
+  bash -lc 'echo MARKER'   ->  14 lines   (13 noise + MARKER)
+  bash -c  'echo MARKER'   ->   1 line    (clean)
+  ```
+
+  **This is not merely cosmetic, which an earlier version of this note got wrong.** Nine lines
+  are permission-denied on stderr, but four are `cp` verbose lines on **stdout**
+  (`'C:\WINDOWS\system32\drivers\etc\hosts' -> '/etc/hosts'` and three more). Any
+  `X=$(bash -lc '...')` capture is silently polluted with those four. Use a non-login `bash -c`
+  where the output is consumed. Claude Code's Bash tool uses a login shell, which is why it
+  shows on every tool call there. Letting an elevated Git Bash complete the post-install should
+  clear it; **not measured**, because verifying it mutates machine state.
+
+  **Residual note 2: exempting `bash.exe` alone is not sufficient.** IFEO matches on image
+  *name*, so every MSYS child (`cat`, `sed`, `grep`, `date`, ...) needs its own exemption.
+
+- **Windows PowerShell 5.1 and PowerShell 7 resolve execution policy from different stores, and
+  it is not two registry keys.** Measured 2026-09-25: 5.1 reads
+  `HKLM\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell`, which was `Undefined`
+  (-> Restricted) and blocked a local unsigned `.ps1`. pwsh 7 here is the **MSIX/Store build
+  (7.6.6)**, which cannot write HKLM and **does not use the registry at all**: its `RemoteSigned`
+  comes from `$PSHOME\powershell.config.json`
+  (`{"Microsoft.PowerShell:ExecutionPolicy": "RemoteSigned"}`). `HKLM\SOFTWARE\Microsoft\PowerShellCore`
+  does not exist on this machine -- an earlier version of this bullet sent readers looking for it.
+  The consequence is unchanged and is the point: a script that "should run" per one shell is
+  blocked in the other. Use `powershell -NoProfile -ExecutionPolicy Bypass -File ...`, which is
+  per-process and stores nothing.
 - `dotnet new sln` produces **`.slnx`** (XML) on SDK 10, not `.sln`.
 - The build creates transient `Hero_<hash>_wpftmp.csproj` projects; errors are reported against
   those names. This is normal WPF behaviour, not a project misconfiguration.

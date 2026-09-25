@@ -234,8 +234,61 @@ because each looks harmless alone.
 
 ## 13. Environment notes
 
-- **Git Bash is broken on this machine** (`fork: Resource temporarily unavailable`,
-  exit `0xC0000142`). Use PowerShell for all tooling.
+- **~~Git Bash is broken on this machine~~ — FIXED 2026-09-25. Bash is usable; the cause was
+  Mandatory ASLR, not Git.** The original entry stands as a record of the symptom
+  (`fork: Resource temporarily unavailable`, exit `0xC0000142`) and was correct for as long as
+  it stood. It was not a Git fault and not specific to this repo. See below.
+
+  **Cause.** Exploit Protection had `ASLR.ForceRelocateImages` (Mandatory ASLR) **ON**
+  system-wide. MSYS2 emulates `fork()` by requiring `msys-2.0.dll` at the *same* base address in
+  parent and child; forced relocation makes that impossible, so every child died before `main`
+  with `STATUS_DLL_INIT_FAILED`.
+
+  **Why it hit MSYS and nothing else.** Measured by reading PE `DllCharacteristics` on this
+  machine, not from documentation:
+
+  ```
+  Git\usr\bin\bash.exe, cat.exe, sed.exe        0x8000  DYNAMIC_BASE=False
+  System32\curl|find|sort|tar|timeout|whoami
+           |hostname|expand|reset .exe           0xC160  DYNAMIC_BASE=True, HIGH_ENTROPY_VA=True
+  ```
+
+  `ForceRelocateImages` only forces relocation on images built **without** `/DYNAMICBASE`. The
+  MSYS binaries are exactly that legacy case. The System32 binaries opt into ASLR natively, so
+  the nine names IFEO shares between them are a **no-op** for Windows — that is what made the
+  fix safe, and it is why the earlier assumption that those collisions carried real security
+  cost was wrong.
+
+  **The diagnostic that isolates it**, if it ever recurs: from Git Bash a non-MSYS child works
+  while every MSYS child dies.
+
+  ```
+  $(cmd.exe /c echo hi)   ->  hi          # general process creation is fine
+  $(echo piped | cat)     ->  (empty)     # MSYS child
+  /usr/bin/cat /dev/null; echo $?  ->  127
+  ```
+
+  **Fix applied 2026-09-25:** 286 per-image `ForceRelocateImages` exemptions across
+  `C:\Program Files\Git\{usr\bin,bin,mingw64\bin}`, 0 failures. **System-wide
+  `ForceRelocateImages` remains ON** — only per-image exemptions were added. Scripts and the
+  reversal record live in `D:\My projects\tools\aslr\`.
+
+  Verified after: `echo $(echo piped | cat) $(date +%Y)` -> `piped 2026`; pipes, `sed`, `grep`,
+  `awk` and nested command substitution all work.
+
+  **Two residual notes.** Every Bash invocation now emits ~12 lines of `/etc` permission-denied
+  noise — Git's post-install scripts can finally *attempt* to run but cannot delete themselves
+  without admin; commands still succeed, and launching Git Bash once as Administrator clears it.
+  And exempting `bash.exe` alone is **not** sufficient: IFEO matches on image *name*, so every
+  MSYS child (`cat`, `sed`, `grep`, `date`, ...) needs its own exemption.
+
+- **Windows PowerShell 5.1 and PowerShell 7 store execution policy in different registry keys.**
+  `HKLM\SOFTWARE\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell` vs PowerShellCore's own
+  path. Measured 2026-09-25: 5.1 read `Undefined` (-> Restricted, blocking a local unsigned
+  `.ps1`) while `Get-ExecutionPolicy -List` under pwsh 7 reported `RemoteSigned` for
+  LocalMachine. A script that "should run" per one shell is blocked in the other. Use
+  `powershell -NoProfile -ExecutionPolicy Bypass -File ...`, which is per-process and stores
+  nothing.
 - `dotnet new sln` produces **`.slnx`** (XML) on SDK 10, not `.sln`.
 - The build creates transient `Hero_<hash>_wpftmp.csproj` projects; errors are reported against
   those names. This is normal WPF behaviour, not a project misconfiguration.

@@ -2217,23 +2217,40 @@ also carries an entry and is correctly excluded — Windows shipped that one.)
 Verified after: `echo $(echo piped | cat) $(date +%Y)` -> `piped 2026`; pipes, `sed`, `grep`, `awk`
 and nested command substitution all work.
 
-### Residual: login shells emit 13 lines of noise, 4 of them on STDOUT
+### Residual: login shells emitted 13 lines of noise, 4 of them on STDOUT — cleared
 
-Git's post-install scripts can finally *attempt* to run and cannot delete themselves without admin,
-so `/etc/profile` re-runs them every time:
+Once fork worked, Git's post-install scripts could finally *attempt* to run, but could not delete
+themselves without admin, so `/etc/profile` re-ran them on every login shell:
 
 ```
 bash -lc 'echo MARKER'   ->  14 lines   (13 noise + MARKER)
 bash -c  'echo MARKER'   ->   1 line    (clean)
 ```
 
-**This is not cosmetic.** Nine lines are permission-denied on stderr, but four are `cp` verbose
+**It was not cosmetic.** Nine lines were permission-denied on stderr, but four were `cp` verbose
 lines on **stdout** (`'C:\WINDOWS\system32\drivers\etc\hosts' -> '/etc/hosts'` and three more), so
-any `X=$(bash -lc '...')` capture is silently polluted. Use a non-login `bash -c` where the output
-is consumed. Claude Code's Bash tool uses a login shell, which is why it shows on every call there.
+any `X=$(bash -lc '...')` capture was silently polluted. Claude Code's Bash tool uses a login shell,
+which is why it showed on every call there.
 
-Letting an elevated Git Bash complete the post-install should clear it. **Not measured** — testing
-it mutates machine state.
+**Cleared 2026-09-25 23:02** by one elevated login shell,
+`Start-Process bash.exe -ArgumentList '-lc','exit' -Verb RunAs`, exit 0. The four scripts in
+`C:\Program Files\Git\etc\post-install` are benign and stay inside Git's own folder: create
+`/dev/shm` and `/dev/mqueue`, link `/etc/mtab`, copy four Windows network files into Git's `etc`,
+then `99-post-install-cleanup.post` deletes the directory — it fires only because
+`C:\Program Files\Git\ReleaseNotes.html` exists, which was checked first. The time above is the
+creation time of the files the scripts wrote. Re-measured 2026-09-27, so it held:
+
+```
+post-install directory      ->  gone
+bash -lc 'echo MARKER'      ->   1 line    (was 14)
+  stdout lines              ->   1         (was 5)
+X=$(bash -lc 'echo ...')    ->  clean capture
+```
+
+**One side effect to know about.** Git's `etc\hosts`, `protocols`, `services` and `networks` are
+now **copies** (`cp -p`), not links — `LinkType` is empty and the content is byte-identical today.
+A later edit to `C:\Windows\System32\drivers\etc\hosts` will not reach MSYS tools until Git's copy
+is refreshed.
 
 ### And exempting `bash.exe` alone is not sufficient
 

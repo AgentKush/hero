@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Win32;
 
 namespace Hero.Core;
@@ -26,6 +27,14 @@ internal static class SetupActions
     /// Distinct from 0 precisely because Windows and the setup window both treat 0 as "it is gone".
     /// </summary>
     internal const int ExitIncomplete = 6;
+
+    /// <summary>
+    /// Returned by --install-service, and then by <see cref="Install"/>, when the guardian service
+    /// was registered but was not running when setup checked. The install itself is complete and
+    /// removable — Apps entry, shortcuts and all — but the machine is not being watched yet, and the
+    /// setup window has to say so rather than turn green.
+    /// </summary>
+    internal const int ExitInstalledNotStarted = 7;
 
     internal const string UninstallKey =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HERO";
@@ -102,9 +111,19 @@ internal static class SetupActions
             process.WaitForExit();
             return process.ExitCode;
         }
-        catch (System.ComponentModel.Win32Exception)
+        // ONLY ERROR_CANCELLED IS THE USER SAYING NO. Every Win32Exception used to mean "declined",
+        // which was harmless while the setup window erased its own messages and is a false
+        // statement now that it does not: antivirus removing the extracted HERO.exe (ERROR_FILE_
+        // NOT_FOUND, ERROR_VIRUS_INFECTED) or a policy that elevates only signed binaries would be
+        // reported to the user as them having cancelled a prompt that never appeared.
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
             return ExitDeclined;                    // the consent dialog was dismissed
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            Log($"could not launch the elevated step: {ex.Message} (error {ex.NativeErrorCode})");
+            return 2;
         }
         catch { return 2; }
     }
@@ -117,6 +136,7 @@ internal static class SetupActions
     /// </summary>
     internal static int Install(bool startMenuShortcut = true, bool desktopShortcut = false)
     {
+        bool stoppedBySetup = false;
         try
         {
             string source = Path.GetDirectoryName(Environment.ProcessPath)
@@ -132,38 +152,92 @@ internal static class SetupActions
                 Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar),
                 StringComparison.OrdinalIgnoreCase);
 
+            // Read FIRST — before a pending removal is cancelled, before the guardian is stopped,
+            // before a byte is copied — so a manifest that cannot be parsed fails with the machine
+            // exactly as it was. An earlier version read it after ClearPendingRemoval, which made
+            // "exactly as it was" untrue twice over: the cancelled removal stayed cancelled, and the
+            // catch below could start a guardian the user had stopped on purpose.
+            var published = inPlace ? null : PublishedFiles(source);
+
             // Before anything is written: cancel any delete a previous uninstall left pending.
             ClearPendingRemoval(destination);
 
             if (!inPlace)
             {
+                // What the PREVIOUS install declared, read before the copy overwrites its manifest.
+                //
+                // Install copies forward and never used to delete, which was safe while every build
+                // shipped the same file set. It stopped being safe when the shapes diverged. Measured:
+                // a framework-dependent console app runs fine, and stops with 0x80008096 ("You must
+                // install or update .NET") the moment a self-contained build's hostfxr.dll is copied
+                // beside it — the apphost sees an app-local hostfxr and treats the folder as
+                // self-contained. So installing a framework-dependent HERO over this release would
+                // have left ~247 runtime files behind and a guardian that cannot start, with an
+                // uninstall that cannot run either, since it is the same HERO.exe.
+                //
+                // HERO's own record decides what goes, never a guess: only names the old deps.json
+                // declared and the new one does not. A stranger's file in Program Files is in
+                // neither list. Unreadable is treated as empty — a missing previous manifest means a
+                // single-file build or no install, and either way there is nothing of ours to remove.
+                HashSet<string> previous;
+                try { previous = PublishedFiles(destination); }
+                catch { previous = new HashSet<string>(StringComparer.OrdinalIgnoreCase); }
+
                 StopEverything();
+                stoppedBySetup = true;
                 Directory.CreateDirectory(destination);
 
                 int copied = 0, skipped = 0;
                 foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.TopDirectoryOnly))
                 {
-                    if (!IsProgramFile(file)) { skipped++; continue; }
+                    if (!IsProgramFile(file, published!)) { skipped++; continue; }
                     CopyWithRetry(file, Path.Combine(destination, Path.GetFileName(file)));
                     copied++;
                 }
                 Log($"copied {copied} files to {destination}" +
                     (skipped > 0 ? $"; left {skipped} unrelated file(s) where they were" : ""));
+
+                int removed = 0;
+                foreach (var stale in previous)
+                {
+                    if (published!.Contains(stale)) continue;
+                    // GetFileName already reduced every declared name to a bare file name, so this
+                    // cannot reach outside the install directory.
+                    string path = Path.Combine(destination, stale);
+                    try
+                    {
+                        if (File.Exists(path)) { File.Delete(path); removed++; }
+                    }
+                    catch (Exception e) { Log($"could not remove the previous build's {stale}: {e.Message}"); }
+                }
+                if (removed > 0) Log($"removed {removed} file(s) the previous build declared and this one does not");
             }
             else
             {
                 Log("running from the install directory; treating this as a repair");
                 StopEverything();
+                stoppedBySetup = true;
             }
 
             // The service registration, the state directory and its lockdown all live in the
             // existing --install-service path. Setup deliberately does not reimplement them: two
             // implementations of "install the service" is how one of them silently rots.
             int code = RunSelf(destination, "--install-service");
-            if (code != 0) { Log($"service registration failed with exit {code}"); return code; }
+            if (code != 0 && code != ExitInstalledNotStarted)
+            {
+                Log($"service registration failed with exit {code}");
+                return code;
+            }
 
             WriteUninstallEntry(destination);
             ApplyShortcuts(destination, startMenuShortcut, desktopShortcut);
+
+            if (code == ExitInstalledNotStarted)
+            {
+                Log("=== install done, but the guardian service is not running; see " +
+                    $"{Path.Combine(HeroPaths.Root, "service.log")} ===");
+                return code;
+            }
 
             Log("=== install done ===");
             return 0;
@@ -177,11 +251,14 @@ internal static class SetupActions
             // the only visible symptom is a service that is no longer running. Measured exactly
             // once, which was enough: a failed copy left HeroGuardian stopped and nothing said so.
             //
+            // Only what SETUP stopped. A failure before that point — an unreadable manifest, say —
+            // must not start a guardian the user had stopped themselves.
+            //
             // Best effort by design: if the service cannot be restarted there is nothing more setup
             // can do about it, and the log is the record.
             try
             {
-                if (Service.ServiceControl.Query() is { Installed: true, Running: false })
+                if (stoppedBySetup && Service.ServiceControl.Query() is { Installed: true, Running: false })
                 {
                     Service.ServiceControl.Start();
                     Log("restarted the guardian service after the failed install");
@@ -232,12 +309,16 @@ internal static class SetupActions
         {
             int code = RunSelf(InstallDirectory, "--uninstall-service");
 
-            // Exit 4 is "there is no HERO.exe there to run", which happens after a partial install
-            // or when the directory was deleted by hand. The service may still be registered, so
-            // fall back to removing it from this process rather than leaving it behind.
-            if (code == 4)
+            // ANY failure to run the installed HERO.exe falls back to removing the service from this
+            // process, not only exit 4 ("there is no HERO.exe there to run", after a partial install
+            // or a directory deleted by hand). A HERO.exe that exists but cannot START is the same
+            // problem from the uninstaller's side — measured, a stray hostfxr.dll makes it exit
+            // 0x80008096 — and treating that as "removal failed" left the LocalSystem service
+            // registered with the one tool that knew how to remove it unable to run.
+            if (code != 0)
             {
-                Log("no installed HERO.exe to run; removing the service directly");
+                Log($"the installed HERO.exe exited {code} (4 means it is missing); " +
+                    "removing the service directly");
                 if (Service.ServiceControl.Query().Installed)
                 {
                     Service.ServiceControl.Stop();
@@ -245,9 +326,10 @@ internal static class SetupActions
                 }
                 Log("service removed");
             }
-            else if (code != 0) { Log($"service removal exited {code}"); failed.Add("the guardian service"); }
             else Log("service removed");
         }
+        // Covers the direct removal above as well: if Stop or Uninstall throws there, the service is
+        // still registered, and this is what keeps the uninstall from reporting that it is gone.
         catch (Exception ex) { Log($"service removal: {ex.Message}"); failed.Add("the guardian service"); }
 
         try
@@ -485,25 +567,57 @@ internal static class SetupActions
     /// everything in the install directory every five minutes, on a loop whose comment reads
     /// "Cheap: seven files, ~27 MB".
     ///
-    /// Two rules, and they hold for both shapes HERO ships in. TOP DIRECTORY ONLY, because a .NET
+    /// Two rules, and they hold for every shape HERO ships in. TOP DIRECTORY ONLY, because a .NET
     /// publish output is flat — subdirectories belong to whatever else was in the folder, never to
     /// HERO. And a NAME TEST rather than an extension free-for-all: HERO's own files by prefix, and
-    /// the managed and native assemblies that a self-contained build needs, which are the ~250 DLLs
-    /// beside it. Nothing else travels: not the "Install HERO.cmd" and "READ ME FIRST.txt" that ship
-    /// in the test zip, not another installer, not a document.
+    /// exactly the assemblies the publish itself declared, plus the three licence texts by exact
+    /// name. Nothing else travels: not the "Install HERO.cmd" and "READ ME FIRST.txt" that ship in
+    /// the release zip, not another installer, not any other document.
     ///
     /// The list is deliberately narrow. A file HERO genuinely needs and does not match here would
     /// fail loudly at start-up, which is recoverable; copying a stranger's files into Program Files
     /// is not.
     /// </summary>
-    private static bool IsProgramFile(string path)
+    private static readonly HashSet<string> LicenceFiles =
+        new(StringComparer.OrdinalIgnoreCase) { "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.txt" };
+
+    private static bool IsProgramFile(string path, IReadOnlySet<string> published)
     {
         string name = Path.GetFileName(path);
         string extension = Path.GetExtension(name);
 
-        // Any .dll: the ~250 managed and native assemblies a self-contained publish lays down
-        // beside the executable, and the two that a framework-dependent one does.
-        if (extension.Equals(".dll", StringComparison.OrdinalIgnoreCase)) return true;
+        // Anything the publish itself declared goes, whatever its extension. Not only the DLLs:
+        // the runtime also lays down createdump.exe, its crash-dump writer, and a rule that
+        // consulted the manifest for .dll alone left that behind — measured, when this ran
+        // against a real self-contained publish and copied 253 of its 254 files.
+        if (published.Contains(name)) return true;
+
+        // A .dll ONLY IF THE PUBLISH ITSELF DECLARED IT. This used to accept any .dll at all, on
+        // the reasoning that a self-contained build lays ~250 of them beside the executable — and
+        // that reasoning stayed true while the rule quietly stopped being safe. The comment above
+        // records testers unzipping into Downloads, and an extension test cannot tell HERO's
+        // assemblies from whatever else is sitting there. Every one it admitted was copied by an
+        // elevated process into the application directory of a LocalSystem service, recorded in
+        // the integrity manifest as HERO's own, and placed first in the loader's search order for
+        // the non-KnownDLL libraries HERO P/Invokes: dwmapi, iphlpapi, psapi, wintrust (checked
+        // against HKLM\...\Session Manager\KnownDLLs; shlwapi is on that list, so it is not here).
+        // A tool whose purpose is spotting a planted DLL would have planted one on the user's behalf.
+        //
+        // The allowlist comes from HERO.deps.json, which names every runtime and native asset the
+        // publish emitted. Measured against a self-contained publish: 254 files on disk, 250
+        // declared, and the four undeclared are HERO's own exe, pdb and two json files — the
+        // prefix rule below. Measured against the framework-dependent build: its two DLLs,
+        // Microsoft.Windows.SDK.NET and WinRT.Runtime, are both declared. A single-file build has
+        // no deps.json beside it and needs no DLLs, so an empty set is the correct answer there.
+        // Declared names were admitted above; reaching this line means the publish did not declare
+        // this one.
+        if (extension.Equals(".dll", StringComparison.OrdinalIgnoreCase)) return false;
+
+        // The licence texts, by exact name. A self-contained HERO embeds Microsoft's MIT-licensed
+        // runtime, and that licence requires its notice to accompany every copy — which includes the
+        // copy this installer makes in Program Files, not only the zip it came in. Exact names rather
+        // than ".txt", so that a stranger's notes sitting in Downloads still cannot ride along.
+        if (LicenceFiles.Contains(name)) return true;
 
         // HERO's own remaining files — but the NAME AND THE EXTENSION both have to agree. Matching
         // on the "HERO." prefix alone let hero.gif through when this was tested against a real
@@ -513,6 +627,43 @@ internal static class SetupActions
         return extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)     // HERO.exe
             || extension.Equals(".pdb", StringComparison.OrdinalIgnoreCase)     // symbols, for a readable stack trace
             || extension.Equals(".json", StringComparison.OrdinalIgnoreCase);   // deps + runtimeconfig
+    }
+
+    /// <summary>
+    /// The file names HERO's own publish declared, read from the HERO.deps.json beside it.
+    ///
+    /// Both the "runtime" (managed) and "native" sections, from every library under every target:
+    /// a self-contained publish puts the runtime pack's own assemblies under the runtime section of
+    /// one library and the native host pieces under another, and missing either leaves an install
+    /// that cannot start. Names are reduced to their file name because the publish is flat — a
+    /// native asset declared as runtimes/win-x64/native/x.dll lands beside the executable as x.dll.
+    ///
+    /// No deps.json is not an error. It is what a single-file build looks like, and that build
+    /// carries everything inside HERO.exe, so the empty set it returns copies exactly the right
+    /// number of DLLs: none. A deps.json that is present but unreadable IS an error, and is allowed
+    /// to throw — the caller reads this before stopping or writing anything, so the failure leaves
+    /// the machine as it was, where guessing would leave an install with half a runtime.
+    /// </summary>
+    private static HashSet<string> PublishedFiles(string source)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        string deps = Path.Combine(source, "HERO.deps.json");
+        if (!File.Exists(deps)) return names;
+
+        using var document = JsonDocument.Parse(File.ReadAllBytes(deps));
+        if (!document.RootElement.TryGetProperty("targets", out var targets)) return names;
+
+        foreach (var framework in targets.EnumerateObject())
+        foreach (var library in framework.Value.EnumerateObject())
+        foreach (var section in new[] { "runtime", "native" })
+        {
+            if (!library.Value.TryGetProperty(section, out var assets)) continue;
+            foreach (var asset in assets.EnumerateObject())
+                names.Add(Path.GetFileName(asset.Name));
+        }
+
+        return names;
     }
 
     /// <summary>

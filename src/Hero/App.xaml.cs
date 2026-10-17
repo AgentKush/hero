@@ -166,6 +166,7 @@ public partial class App : Application
     /// </summary>
     private static int RunServiceInstaller(bool install, bool allowUnsafeDirectory = false)
     {
+        int exitCode = 0;
         try
         {
             if (install)
@@ -228,8 +229,59 @@ public partial class App : Application
 
                 Service.ServiceControl.Install(exe, autoStart: true);
                 Service.SelfIntegrity.Record(directory, unsafeInstallReason);
-                Service.ServiceControl.Start();
-                Service.ServiceLog.Write("Service installed and started.");
+
+                // A SERVICE THAT IS REGISTERED BUT NOT RUNNING IS NOT A FAILED INSTALL — AND IT IS NOT
+                // A SUCCESSFUL ONE EITHER. Both mistakes have been made here.
+                //
+                // Start() used to sit inside the same try as everything above, so when it threw —
+                // 1053 if the process does not reach the service dispatcher inside the SCM's window —
+                // the catch below returned 1 AFTER the service had already been registered.
+                // SetupActions.Install then returned before WriteUninstallEntry and ApplyShortcuts,
+                // leaving a LocalSystem service set to start at every boot with no entry in
+                // Settings > Apps to remove it from, and a setup window that — because Describe()
+                // cleared its error — showed it as installed.
+                //
+                // The first fix for that caught the throw and carried on, which made the install
+                // complete and removable but turned the window green: "The guardian service is
+                // running". On a stranger's machine where antivirus has just stalled the first start
+                // of an unsigned LocalSystem binary, a security tool was then stating something false
+                // about its own protection.
+                //
+                // So registration is the commitment and starting is CHECKED, not assumed. Start()
+                // returning is not proof either: it succeeds once ServiceMain is dispatched, and a
+                // ServiceMain that faults afterwards reports STOPPED with exit 0 (ServiceHost), which
+                // recovery actions do not treat as a failure. The poll below asks the SCM what it
+                // actually sees. 45 s, inside RunSelf's 120 s wait for this process.
+                //
+                // A start that does not take is retried at the next boot, because the service is
+                // AUTO_START. Recovery actions are no help there — they cover a service that dies
+                // after it has started.
+                try
+                {
+                    Service.ServiceControl.Start();
+                    for (int i = 0; i < 45 && !Service.ServiceControl.Query().Running; i++)
+                        System.Threading.Thread.Sleep(1000);
+
+                    if (Service.ServiceControl.Query().Running)
+                    {
+                        Service.ServiceLog.Write("Service installed and started.");
+                    }
+                    else
+                    {
+                        Service.ServiceLog.Write(
+                            "Service installed and Start() returned, but it was not running 45 s later. " +
+                            "It is registered to start automatically, so Windows will try again at the " +
+                            "next boot. The lines above this one say what it did.");
+                        exitCode = Core.SetupActions.ExitInstalledNotStarted;
+                    }
+                }
+                catch (Exception startEx)
+                {
+                    Service.ServiceLog.Write(
+                        $"Service installed but did not start now: {startEx.Message}. It is registered " +
+                        "to start automatically, so Windows will try again at the next boot.");
+                    exitCode = Core.SetupActions.ExitInstalledNotStarted;
+                }
             }
             else
             {
@@ -237,7 +289,7 @@ public partial class App : Application
                 Service.ServiceLog.Write("Service removed.");
             }
 
-            return 0;
+            return exitCode;
         }
         catch (Exception ex)
         {

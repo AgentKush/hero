@@ -309,11 +309,18 @@ internal sealed class SetupWindow : Window
 
         _progress.Visibility = Visibility.Collapsed;
 
+        // DESCRIBE() FIRST IN EVERY BRANCH, THEN THE MESSAGE. Describe rebuilds the buttons, which
+        // the user needs in order to try again — but it also resets the headline and detail and
+        // clears the status line. It used to be called AFTER each message below, so every one of
+        // them was erased the instant it was shown, and replaced by whatever Describe says about the
+        // files on disk. After a half-finished install those files are there, so a failed install
+        // read "HERO is installed", and a partial uninstall read the same with no warning at all —
+        // the exact outcome the ExitIncomplete code was created to prevent.
         if (exit == SetupActions.ExitDeclined)
         {
+            Describe();
             _status.Foreground = Brush("SevMedium");
             _status.Text = "Cancelled at the permission prompt. Nothing was changed.";
-            Describe();
             return;
         }
 
@@ -323,21 +330,38 @@ internal sealed class SetupWindow : Window
         // exit code exists.
         if (exit == SetupActions.ExitIncomplete)
         {
+            Describe();
             _headline.Text = "HERO was only partly removed";
             _detail.Text =
                 "Some of HERO could not be removed, so parts of it are still on this machine. The " +
                 "log lists exactly which steps failed and why.";
             _status.Foreground = Brush("SevHigh");
             _status.Text = SetupActions.LogHint;
+            return;
+        }
+
+        // Installed and removable, but NOT being watched. A security tool turning this screen green
+        // would be telling a stranger their machine is protected when it is not.
+        if (exit == SetupActions.ExitInstalledNotStarted)
+        {
             Describe();
+            _headline.Text = "HERO is installed, but its guardian is not running";
+            _detail.Text =
+                "The guardian service is registered to start with Windows, but it is not running now, " +
+                "so this machine is not being watched yet. Restarting Windows will try again. The " +
+                $"reason is in {Path.Combine(HeroPaths.Root, "service.log")}.";
+            _status.Foreground = Brush("SevHigh");
+            _status.Text = $"Installed to {InstallDirectory}. {SetupActions.LogHint}";
             return;
         }
 
         if (exit != 0)
         {
+            Describe();
+            _headline.Text = $"{verb} did not finish";
+            _detail.Text = "A step failed part-way through. The log says which one, and why.";
             _status.Foreground = Brush("SevHigh");
             _status.Text = $"{verb} failed (exit {exit}). {SetupActions.LogHint}";
-            Describe();
             return;
         }
 
@@ -345,10 +369,13 @@ internal sealed class SetupWindow : Window
 
         if (switchName == App.SetupInstallSwitch)
         {
+            // True now, where it used to be assumed: exit 0 is only returned once --install-service
+            // has seen the service actually running.
             _headline.Text = "HERO is installed";
             _detail.Text =
-                "The guardian service is running and will start with the machine. HERO is in your " +
-                "Start menu, and can be removed from Settings > Apps like anything else.";
+                "The guardian service is running and will start with the machine. " +
+                (StartMenuShortcutExists ? "HERO is in your Start menu, and it " : "HERO ") +
+                "can be removed from Settings > Apps like anything else.";
             _status.Text = $"Installed to {InstallDirectory}.";
             _buttons.Children.Clear();
             Add("Open HERO", ButtonTone.Primary, () =>

@@ -271,7 +271,7 @@ FALLBACK without elevation, no NuGet: powershell.exe -NoProfile -Command "Get-Ph
 **False positives:** Do not present 'SMART unavailable' as a drive problem. It is the normal non-elevated state. Show 'requires elevation' and offer a one-click elevated re-check.
 
 ### [low] P/Invoke: SHGetKnownFolderPath — verified
-VERIFIED: returned C:\Users\finla\AppData\Local for FOLDERID_LocalAppData. The returned buffer is CoTaskMem and MUST be freed or you leak on every call.
+VERIFIED: returned C:\Users\<user>\AppData\Local for FOLDERID_LocalAppData. The returned buffer is CoTaskMem and MUST be freed or you leak on every call.
 
 **How:** [LibraryImport("shell32.dll")]
 internal static partial int SHGetKnownFolderPath(in Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
@@ -496,7 +496,7 @@ The safety constraint requires that critical processes are un-killable. A name-b
 EVERYTHING ABOVE WAS EXECUTED, NOT RECALLED. Environment confirmed: Windows 11 Pro build 26200, .NET SDK 10.0.303 (also 9.0.317 present - pin with global.json), Microsoft.WindowsDesktop.App 10.0.11 and Microsoft.NETCore.App 10.0.11 installed as both ref packs and shared runtimes. The probe shell was NON-ELEVATED (WindowsPrincipal.IsInRole(Administrator)=False, token integrity RID 0x2000 Medium), so every access-denied result reflects genuine unprivileged behaviour rather than an artifact of testing.
 
 WORKING PROBE PROJECTS - all still on disk, all build and run, use them as the starting point rather than retyping the P/Invokes:
-C:\Users\finla\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\wardenprobe\
+C:\Users\<user>\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\wardenprobe\
   A\  minimal WPF+WinForms app; also the publish-matrix testbed (out-fd, out-sc)
   B\Probe.cs   Toolhelp32, OpenProcess, QueryFullProcessImageName, IsWow64Process2, NtQueryInformationProcess+PEB cmdline, GetExtendedTcp/UdpTable, WinVerifyTrust, GetSystemPowerStatus, integrity level, SHGetKnownFolderPath, EnumServicesStatusEx, DeviceIoControl
   C\Cat.cs     catalog-aware signature verification (the critical false-positive fix)

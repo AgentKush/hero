@@ -80,13 +80,13 @@ A scan of live processes found **9 unsigned running images. Every single one is 
 
 ```
 C:\Program Files\WindowsApps\Microsoft.WidgetsPlatformRuntime_...\WidgetService.exe   <- Microsoft's own
-C:\Users\finla\AppData\Local\Microsoft\WinGet\Packages\astral-sh.uv_...\uv.exe
-C:\Users\finla\AppData\Local\Microsoft\WinGet\Packages\astral-sh.uv_...\uvx.exe
-C:\Users\finla\AppData\Local\uv\cache\archive-v0\...\Scripts\python.exe
-C:\Users\finla\AppData\Local\uv\cache\archive-v0\...\Scripts\browser-use.exe
-C:\Users\finla\AppData\Roaming\Claude\Claude Extensions\...\.venv\Scripts\windows-mcp.exe
-C:\Users\finla\AppData\Roaming\Claude\Claude Extensions\...\.venv\Scripts\blender-mcp.exe
-C:\Users\finla\AppData\Local\Packages\Claude_...\uv\python\cpython-3.12.12-...\python.exe
+C:\Users\<user>\AppData\Local\Microsoft\WinGet\Packages\astral-sh.uv_...\uv.exe
+C:\Users\<user>\AppData\Local\Microsoft\WinGet\Packages\astral-sh.uv_...\uvx.exe
+C:\Users\<user>\AppData\Local\uv\cache\archive-v0\...\Scripts\python.exe
+C:\Users\<user>\AppData\Local\uv\cache\archive-v0\...\Scripts\browser-use.exe
+C:\Users\<user>\AppData\Roaming\Claude\Claude Extensions\...\.venv\Scripts\windows-mcp.exe
+C:\Users\<user>\AppData\Roaming\Claude\Claude Extensions\...\.venv\Scripts\blender-mcp.exe
+C:\Users\<user>\AppData\Local\Packages\Claude_...\uv\python\cpython-3.12.12-...\python.exe
 ```
 
 These are unsigned **and** running from `%LOCALAPPDATA%` / `%APPDATA%` — i.e. they satisfy the
@@ -956,8 +956,8 @@ user-writable. Measured:
 ```
 C:\Program Files\HERO                     unsafe=False
 C:\Windows\System32                       unsafe=False
-D:\...\bin\Release\net10.0-windows...     unsafe=True   owned by DESKTOP-...\finla
-D:\My projects\hero\dist                  unsafe=True   owned by DESKTOP-...\finla
+D:\...\bin\Release\net10.0-windows...     unsafe=True   owned by DESKTOP-...\<user>
+D:\My projects\hero\dist                  unsafe=True   owned by DESKTOP-...\<user>
 ```
 
 Ownership counts as write access: an owner holds WRITE_DAC implicitly and can grant itself the rest.

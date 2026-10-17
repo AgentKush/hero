@@ -37,7 +37,8 @@ namespace Hero.Maintenance;
 /// which selected exactly Default and rejected all 113 component directories here.
 ///
 /// Delete by KEY, label by name: Edge's directory "Default" carries the info_cache display name
-/// "Profile 1", Chrome's carries "Finlay", and Opera GX's is the empty string. A UI that labels a
+/// "Profile 1", Chrome's carries the account holder's own first name, and Opera GX's is the empty
+/// string — three different shapes from three browsers on one machine. A UI that labels a
 /// profile from that field has to fall back to the directory name, and a cleaner that resolves a
 /// path from it would look for a directory that does not exist.
 ///

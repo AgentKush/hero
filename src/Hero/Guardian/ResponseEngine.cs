@@ -236,7 +236,7 @@ internal sealed class RegistryUndo
     /// The raw value bytes. Captured through RegQueryValueExW rather than RegistryKey.GetValue,
     /// which hands back a managed string for REG_SZ/REG_EXPAND_SZ and therefore loses embedded
     /// nulls, non-standard terminators and trailing bytes — and silently expands
-    /// "%USERPROFILE%\..." into "C:\Users\finla\...", so a naive undo writes different data.
+    /// "%USERPROFILE%\..." into "C:\Users\<user>\...", so a naive undo writes different data.
     /// </summary>
     public string ValueBase64 { get; set; } = "";
     /// <summary>True when the value was read through the WOW64 32-bit view.</summary>

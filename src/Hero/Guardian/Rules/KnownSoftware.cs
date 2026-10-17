@@ -135,7 +135,7 @@ internal static class KnownSoftware
     // not, and they used to be resolved the same way: one Environment.GetFolderPath at type-init,
     // against whatever identity HERO happened to be running as. Once the guardian moved into the
     // LocalSystem service that became C:\Windows\system32\config\systemprofile and C:\Windows\TEMP,
-    // so C:\Users\finla\Downloads\dropper.exe matched none of them and fell through to
+    // so C:\Users\<user>\Downloads\dropper.exe matched none of them and fell through to
     // PathClass.Unknown.
     //
     // Unknown is not inert. It is user-writable (IsUserWritable includes it deliberately, as the

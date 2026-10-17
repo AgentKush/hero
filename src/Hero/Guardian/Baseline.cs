@@ -448,8 +448,8 @@ internal static class PathModel
 
         // And the same four for every signed-in account. Inside the service the four above resolve
         // under systemprofile, so without these a real user's path matched no prefix at all and
-        // tokenised to its literal self: C:\Users\finla\AppData\Local\x.exe stayed
-        // c:\users\finla\appdata\local\x.exe. That is not merely untidy — it is what BaseTrust
+        // tokenised to its literal self: C:\Users\<user>\AppData\Local\x.exe stayed
+        // c:\users\<user>\appdata\local\x.exe. That is not merely untidy — it is what BaseTrust
         // reads, so every such path missed the 0.30 %LOCALAPPDATA% tier and landed on the 0.45
         // "ordinary fixed drive" default, scoring a profile drop as MORE trustworthy than it is.
         //

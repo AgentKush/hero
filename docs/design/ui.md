@@ -1265,9 +1265,9 @@ ADMIN / PRIVILEGE NOTES
 Nothing in this design layer requires elevation. The DWM calls, font access and WPF rendering are all per-user. Elevation is a Guardian-engine concern (process termination, service enumeration, ETW sessions), and the UI should be designed to run unelevated with the engine in a separate elevated service — which means every action button needs a defined disabled state and an explanatory tooltip for when the engine is unavailable. Reserve a 32px inline banner slot at the top of the content canvas for "The protection service is not running" with a [Start] action; it is far cheaper to design that slot now than to retrofit it.
 
 SCRATCH ARTEFACTS (verification only, safe to delete, not part of the deliverable)
-C:\Users\finla\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\verify-final.ps1 — the 172-check contrast script; worth copying into the Warden repo as a CI check.
-C:\Users\finla\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\MicaTest\ — the compiled DWM probe whose Program.cs contains the verified interop code.
-C:\Users\finla\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\mica-probe.txt — the recorded S_OK results.
+C:\Users\<user>\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\verify-final.ps1 — the 172-check contrast script; worth copying into the Warden repo as a CI check.
+C:\Users\<user>\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\MicaTest\ — the compiled DWM probe whose Program.cs contains the verified interop code.
+C:\Users\<user>\AppData\Local\Temp\claude\D--My-projects\a6d7918b-0315-41b5-8d82-d4025862d88a\scratchpad\mica-probe.txt — the recorded S_OK results.
 
 ## ADVERSARIAL CRITIQUE
 ### Corrections (14)

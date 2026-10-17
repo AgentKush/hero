@@ -38,7 +38,7 @@ internal static class DiskAnalyzer
     ///
     /// Every file adds its size to each ancestor up to this depth, so the cost is (depth) dictionary
     /// operations per file rather than (its own depth). Three levels answers "which folder is
-    /// eating the disk" for every real case — C:\Users\finla\AppData is depth 3 — while keeping a
+    /// eating the disk" for every real case — C:\Users\<user>\AppData is depth 3 — while keeping a
     /// 1.5M-file walk to roughly 4.5M cheap operations instead of an unbounded number.
     /// </summary>
     private const int RollupDepth = 3;

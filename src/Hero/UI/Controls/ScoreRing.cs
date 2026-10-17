@@ -604,7 +604,7 @@ internal static class GlyphText
     /// Fits a string to a pixel budget, truncating in the MIDDLE when asked.
     ///
     /// Paths truncate in the middle because the filename is the load-bearing part:
-    /// "C:\Users\...\Temp\svchost32.exe" is useful, "C:\Users\finla\AppData\Local\Mic..." is not.
+    /// "C:\Users\...\Temp\svchost32.exe" is useful, "C:\Users\<user>\AppData\Local\Mic..." is not.
     /// WPF's TextTrimming has no middle mode, which is one of the reasons these cells are drawn
     /// rather than templated.
     /// </summary>

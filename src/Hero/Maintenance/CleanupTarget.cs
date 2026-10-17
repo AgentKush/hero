@@ -587,7 +587,7 @@ internal sealed record WalkOptions
 /// Three decisions here are load-bearing and were all forced by measurement on this machine:
 ///
 /// 1. <c>AttributesToSkip = ReparsePoint</c> is mandatory, not an optimisation.
-///    <c>C:\Users\finla\CrossDevice\OnePlus 13\storage\</c> is a tagless, targetless reparse
+///    <c>C:\Users\<user>\CrossDevice\OnePlus 13\storage\</c> is a tagless, targetless reparse
 ///    point served by Phone Link; walking it enumerates the user's phone over the wire — an
 ///    unbounded stall and a privacy incident. With the skip in place it correctly costs nothing.
 ///    Note the side effect: overriding the default mask means Hidden and System directories ARE

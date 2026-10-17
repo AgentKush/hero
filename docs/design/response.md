@@ -140,7 +140,7 @@ MEASURED ON TARGET: Get-MpPreference reports EnableControlledFolderAccess=1 and 
 **False positives:** Do not present this as a Warden failure. The dashboard should show a one-time setup card explaining that Defender is protecting those folders and that allowlisting Warden is a deliberate user decision.
 
 ### [high] Persistence removal — registry value
-The most common persistence class and the easiest to undo perfectly, provided the raw value bytes and the exact value kind are captured. The classic bug is capturing an expanded string: reading an REG_EXPAND_SZ value normally returns 'C:\Users\finla\...' where the stored literal was '%USERPROFILE%\...', so a naive undo writes the wrong data and silently changes behaviour.
+The most common persistence class and the easiest to undo perfectly, provided the raw value bytes and the exact value kind are captured. The classic bug is capturing an expanded string: reading an REG_EXPAND_SZ value normally returns 'C:\Users\<user>\...' where the stored literal was '%USERPROFILE%\...', so a naive undo writes the wrong data and silently changes behaviour.
 
 **How:** Verified-present locations to monitor: HKCU\Software\Microsoft\Windows\CurrentVersion\Run (currently holds legitimate Steam, AMDNoiseSuppression, Opera GX Stable, MicrosoftEdgeAutoLaunch entries — baseline these), ...\RunOnce, HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run, ...\RunOnce, HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run, HKCU\Software\Microsoft\Windows NT\CurrentVersion\Windows (Load/Run), HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon (Shell must equal 'explorer.exe', Userinit must equal 'C:\WINDOWS\system32\userinit.exe,' — both verified at baseline), HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options (Debugger values). UNDO RECORD, captured first: hive, full subkey path, value name, RegistryValueKind, and RAW bytes read with RegistryValueOptions.DoNotExpandEnvironmentNames, plus the WOW64 view used (KEY_WOW64_64KEY vs KEY_WOW64_32KEY) and the key's SDDL. REMOVE with RegDeleteValueW. UNDO with RegSetValueExW passing the identical kind and byte array. Never delete the parent key.
 
@@ -163,7 +163,7 @@ Services have the largest undo surface of any persistence class — a dozen conf
 ### [medium] Persistence removal — startup folder shortcut
 The simplest class, and it should reuse the quarantine machinery wholesale rather than getting its own deletion path. A .lnk is just a file, so quarantining it gives byte-identical restore for free — including the shortcut's link-tracker data, which a reconstruct-from-parsed-properties approach would silently lose.
 
-**How:** Monitor C:\Users\finla\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup and C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup (both verified present, both currently empty — a clean baseline). REMOVE by routing the .lnk through the standard quarantine path (MoveFileExW into the vault with a full manifest). UNDO is the standard restore path — no separate code. Additionally parse for DISPLAY ONLY via IShellLinkW + IPersistFile::Load to show the user TargetPath, Arguments, WorkingDirectory, IconLocation and ShowCmd in the incident UI, but never reconstruct the .lnk from these on restore.
+**How:** Monitor C:\Users\<user>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup and C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup (both verified present, both currently empty — a clean baseline). REMOVE by routing the .lnk through the standard quarantine path (MoveFileExW into the vault with a full manifest). UNDO is the standard restore path — no separate code. Additionally parse for DISPLAY ONLY via IShellLinkW + IPersistFile::Load to show the user TargetPath, Arguments, WorkingDirectory, IconLocation and ShowCmd in the incident UI, but never reconstruct the .lnk from these on restore.
 
 **False positives:** Both startup folders are currently empty on this machine, so any new arrival is genuinely notable — but installers legitimately add shortcuts. Correlate the shortcut's creation with a recent installer execution before scoring it.
 
@@ -262,7 +262,7 @@ Escalation ordering: suspension must precede kill for two independent reasons �
 
 API QUIRKS THAT WILL BITE.
 
-Registry: read values with RegistryValueOptions.DoNotExpandEnvironmentNames. A normal read of an REG_EXPAND_SZ returns the expanded path, so a naive undo writes 'C:\Users\finla\...' where the literal was '%USERPROFILE%\...'. Capture the raw bytes and the exact RegistryValueKind, and record which WOW64 view (KEY_WOW64_64KEY vs KEY_WOW64_32KEY) was used.
+Registry: read values with RegistryValueOptions.DoNotExpandEnvironmentNames. A normal read of an REG_EXPAND_SZ returns the expanded path, so a naive undo writes 'C:\Users\<user>\...' where the literal was '%USERPROFILE%\...'. Capture the raw bytes and the exact RegistryValueKind, and record which WOW64 view (KEY_WOW64_64KEY vs KEY_WOW64_32KEY) was used.
 
 Timestamps: store as raw FILETIME 100-nanosecond ticks, never as DateTime. DateTime round-trips lossily and byte-identical restore is a checked guarantee in this design, verified by re-hashing after restore.
 

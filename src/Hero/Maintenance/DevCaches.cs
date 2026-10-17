@@ -35,8 +35,7 @@ internal static class DevCaches
     /// <summary>How the caller scopes the expensive, project-tree-walking detectors.</summary>
     internal sealed record DevScanOptions
     {
-        /// <summary>Where the user's own code lives. Defaults to "D:\My projects" plus the
-        /// Documents-based Unreal location, both verified present on this machine.</summary>
+        /// <summary>Where the users' own code lives. See <see cref="DefaultProjectRoots"/>.</summary>
         internal IReadOnlyList<string> ProjectRoots { get; init; } = DefaultProjectRoots();
 
         /// <summary>
@@ -53,13 +52,55 @@ internal static class DevCaches
         internal int OrphanAgeDays { get; init; } = 90;
     }
 
+    /// <summary>
+    /// Where each signed-in user's code conventionally lives.
+    ///
+    /// THIS USED TO NAME THE DEVELOPER'S OWN FOLDERS — D:\My projects and D:\Projects, as string
+    /// literals compiled into every copy of HERO. That is a personal path shipping to strangers,
+    /// and on any machine that happened to have a D:\Projects it walked that tree twelve levels
+    /// deep for a reason its owner was never told. The walk is read-only and its purpose is
+    /// protective (see <see cref="ReferencedGradleDistributions"/>, which keeps Gradle versions a
+    /// project still pins from being proposed for deletion), so the harm was small — but the
+    /// literals were in the binary regardless.
+    ///
+    /// Resolved PER SIGNED-IN USER through <see cref="Core.UserHives"/>, not through
+    /// Environment.SpecialFolder. That is not a style choice: the catalogue is built inside the
+    /// guardian service, which runs as LocalSystem, and there SpecialFolder.MyDocuments resolves to
+    /// the system profile's Documents rather than any person's. The Unreal line below used to be
+    /// written only that way, so inside the service it could find an Unreal project only if one
+    /// had been saved into the system profile. UserHives reads the profiles from the loaded hives
+    /// and works the same under either identity.
+    ///
+    /// The literals were not free to lose, and an earlier version of this comment said they were.
+    /// It had checked only D:\My projects, which holds no gradle-wrapper.properties. D:\Projects
+    /// holds three, pinning gradle-9.0.0-bin (270.5 MB) and gradle-9.2.1-bin (143.3 MB), so on the
+    /// developer's machine dropping it would have offered 413.8 MB of in-use build tooling for
+    /// deletion as "unreferenced". The user's own folders therefore come from
+    /// <see cref="Core.HeroSettings.DeveloperRoots"/> first — the same list that caps autonomous
+    /// action in <see cref="Guardian.ProtectedSet"/>, since both mean "where my code lives".
+    /// </summary>
     internal static IReadOnlyList<string> DefaultProjectRoots()
     {
         var roots = new List<string>();
-        void Add(string p) { if (FileWalk.Probe(p) == AccessState.Measured) roots.Add(p); }
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string p)
+        {
+            if (seen.Add(p) && FileWalk.Probe(p) == AccessState.Measured) roots.Add(p);
+        }
 
-        Add(@"D:\My projects");
-        Add(@"D:\Projects");
+        foreach (var named in Core.HeroSettings.Current.DeveloperRoots) Add(named);
+
+        foreach (var user in Core.UserHives.Folders())
+        {
+            Add(Path.Combine(user.Profile, "source", "repos"));        // Visual Studio's default
+            Add(Path.Combine(user.Profile, "Projects"));
+            Add(Path.Combine(user.Profile, "Documents", "Unreal Projects"));
+        }
+
+        // The calling identity's own Documents as well. The per-user line above assembles the
+        // path, so it misses a Documents folder redirected into OneDrive; this one resolves the
+        // redirection correctly whenever the caller IS that user, which the dashboard is. Inside
+        // the service it names systemprofile and simply finds nothing.
         Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Unreal Projects"));
         return roots;
     }
@@ -379,7 +420,12 @@ internal static class DevCaches
         string gradle = Path.Combine(Profile, ".gradle");
         if (FileWalk.Probe(gradle) == AccessState.Measured)
         {
-            var referenced = ReferencedGradleDistributions();
+            // DEFERRED until the filter first runs, rather than computed while the catalogue is
+            // built. The catalogue is enumerated on the UI thread when the Maintenance page opens,
+            // and this walks every project root twelve levels deep. It used to be one developer's
+            // folder; it is now every signed-in user's source\repos and Projects as well, which on
+            // a stranger's machine can be a very large tree to walk before a page can paint.
+            var referenced = new Lazy<List<string>>(ReferencedGradleDistributions);
 
             yield return new CleanupTarget
             {
@@ -425,7 +471,7 @@ internal static class DevCaches
                     Paths = new[] { dists },
                     Risk = CleanupRisk.Low,
                     Tier = AutomationTier.Prompt,
-                    Filter = f => !referenced.Any(r => f.Path.Contains(r, StringComparison.OrdinalIgnoreCase)),
+                    Filter = f => !referenced.Value.Any(r => f.Path.Contains(r, StringComparison.OrdinalIgnoreCase)),
                     WhatBreaksIfWrong = "A project pinned to a removed version re-downloads it — " +
                                         "slow, but self-healing.",
                 };

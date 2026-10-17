@@ -358,7 +358,9 @@ internal sealed class ProtectedSet
     /// Deliberately NOT auto-detected by marker files. Walking for .git / package.json /
     /// node_modules would promote %LOCALAPPDATA%\Programs and %APPDATA% — every Electron app ships
     /// those — which is the single most common infostealer drop location on a Windows machine.
-    /// The seeds below are explicit, and the user edits the list in the dashboard.
+    /// The seeds below are explicit. The user's own folders come from
+    /// <see cref="Core.HeroSettings.DeveloperRoots"/>; there is no screen for that list yet, so it is
+    /// edited in settings.json, and read once when the guardian starts.
     /// </summary>
     internal IReadOnlyList<string> DeveloperRoots
     {
@@ -367,7 +369,18 @@ internal sealed class ProtectedSet
 
     internal ProtectedSet()
     {
-        var seeds = new List<string> { @"D:\My projects" };
+        // THE PERSON AT THE MACHINE NAMES THEIR OWN CODE FOLDERS; HERO DOES NOT.
+        //
+        // This list used to open with the literal "D:\My projects" — the developer's own folder,
+        // compiled into every copy of HERO. On every install anywhere that folder was therefore
+        // exempt from autonomous containment, and with the source public, anyone could read which
+        // folder it was: a payload dropped there would be reported but never contained by HERO on
+        // its own, on any machine with a D: drive a standard user could create a folder on.
+        //
+        // The protection it gave the developer was real — twenty of their own unsigned builds sat
+        // under it — so it moves into their settings rather than disappearing. Nothing is exempted
+        // by default that the user did not name.
+        var seeds = new List<string>(Core.HeroSettings.Current.DeveloperRoots);
 
         // SEEDED PER SIGNED-IN USER, not from this process's own identity.
         //

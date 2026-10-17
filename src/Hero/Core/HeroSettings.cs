@@ -180,6 +180,28 @@ internal sealed class HeroSettings
     /// <summary>PersistenceEntry.Key values the user has accepted.</summary>
     internal List<AllowEntry> AllowedPersistence { get; } = new();
 
+    /// <summary>
+    /// Folders that hold the user's own code. HERO never acts on its own inside them — it still
+    /// detects and reports, the response simply caps at observe-and-notify — and the maintenance
+    /// scan reads them to keep the build tools a project still pins.
+    ///
+    /// A setting because it is personal. It used to be the literal "D:\My projects", compiled into
+    /// every copy of HERO, so every install anywhere quietly exempted that folder from autonomous
+    /// containment, and the public source said which folder it was. Empty by default: nothing is
+    /// exempted that the person at the machine did not name.
+    ///
+    /// READ, NEVER WRITTEN. There is no screen for this yet, so the file is the only place it is
+    /// set, and that makes the file the only authority. Writing it back from memory overwrote hand
+    /// edits — a dashboard settings save would replace them with the empty list the service had
+    /// loaded at start, silently. And writing an empty "developerRoots": [] into every file planted
+    /// exactly the line someone adds a second copy beside. So HERO leaves the key alone, Save
+    /// preserves it like any foreign key, and it takes effect when HERO next starts.
+    ///
+    /// To set it, add one line to settings.json in an elevated editor, then restart HERO:
+    ///   "developerRoots": ["C:\\src", "D:\\Code"],
+    /// </summary>
+    internal List<string> DeveloperRoots { get; } = new();
+
     /// <summary>Rule id -&gt; mute. Keyed by <c>IDetectionRule.Id</c>.</summary>
     internal Dictionary<string, RuleMute> MutedRules { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -365,6 +387,7 @@ internal sealed class HeroSettings
         ReadAllowList(root, "allowedPublishers", s.AllowedPublishers);
         ReadAllowList(root, "allowedEndpoints", s.AllowedEndpoints);
         ReadAllowList(root, "allowedPersistence", s.AllowedPersistence);
+        ReadStringList(root, "developerRoots", s.DeveloperRoots);
 
         if (root["mutedRules"] is JsonObject mutes)
         {
@@ -500,6 +523,9 @@ internal sealed class HeroSettings
             root["allowedEndpoints"] = WriteAllowList(AllowedEndpoints);
             root["allowedPersistence"] = WriteAllowList(AllowedPersistence);
 
+            // developerRoots is deliberately NOT written: see DeveloperRoots. It survives every save
+            // as a key HERO reads but does not own.
+
             var mutes = new JsonObject();
             foreach (var kv in MutedRules)
             {
@@ -532,7 +558,22 @@ internal sealed class HeroSettings
             if (!File.Exists(HeroPaths.Settings)) return null;
             var text = File.ReadAllText(HeroPaths.Settings);
             if (string.IsNullOrWhiteSpace(text)) return null;
-            return JsonNode.Parse(text) as JsonObject;
+
+            // DUPLICATE KEYS ARE REJECTED HERE, AT PARSE, OR THEY KILL THE GUARDIAN LATER.
+            //
+            // JsonNode builds its property table lazily, so a file with the same key twice parses
+            // cleanly and then throws "An item with the same key has already been added" on the
+            // first indexer access — and on every one after it. Load reads several keys outside a
+            // try, so that throw escaped, and Load runs in GuardianService's field initialiser: the
+            // service faulted at every boot, reported STOPPED with exit 0 so recovery never fired,
+            // and the dashboard's local fallback hit the same initialiser. Installed, and nothing
+            // watching. Measured on .NET 10.0.12.
+            //
+            // That became likely rather than theoretical the moment developerRoots was documented
+            // as something to add by hand. Rejected here, a duplicate is just another corrupt file,
+            // and gets the contract every corrupt file already has.
+            return JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { AllowDuplicateProperties = false })
+                   as JsonObject;
         }
         catch
         {
@@ -697,6 +738,20 @@ internal sealed class HeroSettings
             });
         }
         return arr;
+    }
+
+    private static void ReadStringList(JsonObject root, string name, List<string> into)
+    {
+        if (root[name] is not JsonArray arr) return;
+        foreach (var node in arr)
+        {
+            try
+            {
+                if (node is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s))
+                    into.Add(s.Trim());
+            }
+            catch { /* one bad entry must not discard the rest of the list */ }
+        }
     }
 
     private static string FormatTime(TimeSpan t) =>

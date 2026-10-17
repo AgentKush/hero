@@ -111,12 +111,11 @@ dotnet run --project "D:\My projects\hero\src\Hero\Hero.csproj"
 
 Pass `--tray` to start hidden in the system tray, which is how it runs at logon.
 
-To produce the single-file build that gets handed to a tester — one self-contained
-`HERO.exe` with the .NET runtime inside it, so the machine it lands on needs nothing
-installed:
+To produce the build that is handed to other people — self-contained, so the machine it
+lands on needs no .NET installed:
 
 ```bash
-dotnet publish src/Hero/Hero.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/test
+dotnet publish src/Hero/Hero.csproj -c Release -r win-x64 --self-contained true -o dist/release
 ```
 
 That command lives here because it has to. `Hero.csproj` sets `SelfContained` to false
@@ -124,8 +123,22 @@ and names no runtime identifier, so those switches are the only record of how th
 distributed artefact differs from a `dotnet build` — and `dist/` is gitignored. Without
 this line the thing people actually run could not be reproduced from the repository.
 
-Double-clicking that `HERO.exe` starts the app. Installation is behind `--setup`, which
-is what `Install HERO.cmd` in the test package invokes.
+It is deliberately **not** a single-file build, although that would be one tidy download. A
+single-file HERO has to unpack its native runtime before it can run, and the guardian runs as
+LocalSystem — so it would unpack it into the system account's temp directory, and Microsoft's
+own single-file documentation warns that extraction directories should not be writable by
+users or services with lower privileges. It would also have to decompress itself before the
+guardian could report to the Service Control Manager, a start-up cost nobody has measured
+against the SCM's fixed deadline. The multi-file build does neither. It is ~254 files, which
+nobody handles: they extract one folder and run one script.
+
+The release zip adds the contents of [`packaging/`](packaging/) — `Install HERO.cmd` and
+`READ ME FIRST.txt` — together with `LICENSE`, `NOTICE` and `THIRD-PARTY-NOTICES.txt`, all
+inside a single top-level folder, so that extracting it can never mingle HERO's files with
+whatever else is in Downloads.
+
+Double-clicking `HERO.exe` runs HERO in place and installs nothing. Installation is behind
+`--setup`, which is what `Install HERO.cmd` invokes.
 
 HERO ships `asInvoker` and deliberately does **not** request administrator rights at launch. A tray
 app that triggers a UAC prompt on every boot teaches you to click through prompts, which is a net
@@ -134,7 +147,8 @@ they are needed.
 
 ## Where it keeps things
 
-Everything lives under `%LOCALAPPDATA%\HERO`:
+Installed, HERO puts the program in `C:\Program Files\HERO` and everything it records under
+`%ProgramData%\HERO`:
 
 | Path | Contents |
 |---|---|
@@ -143,10 +157,21 @@ Everything lives under `%LOCALAPPDATA%\HERO`:
 | `vault/` | Quarantined files plus their restore manifests |
 | `undo/` | Undo records for persistence removals and firewall rules |
 | `events/` | Forensic snapshots and incident history |
-| `logs/` | Diagnostics |
+| `service.log`, `service.log.1` | The guardian service's diagnostics, rotated at 2 MB |
+| `install.log` | What setup and uninstall did |
+| `integrity.json` | What the installed program files hashed to, re-checked every five minutes |
 
-Uninstalling is deleting the executable and that folder. Nothing is written to the registry except
-the run-at-logon entry, if you enable it.
+The dashboard keeps its own per-user log in `%LOCALAPPDATA%\HERO\logs`.
+
+Installing writes to the registry: the `HeroGuardian` service registration, an uninstall entry
+under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\HERO` so HERO appears in
+Settings → Apps, and the run-at-logon entry if you enable it.
+
+**Uninstall from Settings → Apps, or run `HERO.exe --setup` and choose Uninstall.** Do not just
+delete the folder: that leaves the guardian service registered as LocalSystem and starting at
+every boot, with nothing left on disk that knows how to remove it. Uninstalling keeps
+`%ProgramData%\HERO` on purpose, so a reinstall picks up where it left off — delete that folder
+by hand if you want it gone.
 
 ## Privacy
 

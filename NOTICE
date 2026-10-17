@@ -21,17 +21,19 @@ class libraries, WPF, and in-box Windows APIs. There is no vendored third-party
 source in this repository.
 
 The self-contained build is the one exception, and it is a packaging one rather
-than a source one: `dotnet publish --self-contained` embeds the .NET runtime and
-the WPF assemblies into the single HERO.exe it produces. Those are Microsoft's
-work, licensed under the MIT License, and the MIT License requires its notice to
-travel with substantial portions of the software.
+than a source one: `dotnet publish --self-contained` lays the .NET runtime and
+the WPF assemblies down beside HERO.exe. Those are Microsoft's work, licensed
+under the MIT License, and the MIT License requires its notice to travel with
+substantial portions of the software.
 
 The .NET SDK does not copy those notices into publish output, so they are shipped
 alongside the binary deliberately. They are reproduced in
 THIRD-PARTY-NOTICES.txt, taken verbatim from the runtime pack that produced the
 build (microsoft.netcore.app.runtime.win-x64).
 
-Microsoft.Windows.SDK.NET.dll, present in the framework-dependent build, ships
-under the Windows SDK licence terms rather than MIT. Those terms permit
-redistribution inside an application and impose no notice condition, so nothing
-is required here for it. See https://aka.ms/WinSDKLicenseURL.
+Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll, present in both the
+framework-dependent and the self-contained build, are Microsoft's and come from
+the Microsoft.Windows.SDK.NET.Ref package. That package declares them licensed
+under the Microsoft Windows SDK licence terms, https://aka.ms/WinSDKLicenseURL --
+not under Apache-2.0 or MIT -- and use of those two files is subject to those
+terms.

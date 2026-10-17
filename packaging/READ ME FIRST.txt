@@ -1,0 +1,70 @@
+HERO 1.0.0 - read this first
+============================
+
+HOW TO INSTALL
+  1. Extract this whole zip to a folder. Downloads is fine.
+  2. Open the HERO-v1.0.0 folder it creates and run "Install HERO.cmd".
+  3. HERO's setup window opens. Click Install.
+  4. Windows asks for administrator permission ONCE. That prompt is HERO
+     registering its guardian service.
+
+  Double-clicking HERO.exe does NOT install anything. It runs HERO in place,
+  with no service and nothing at startup, and it does not tell you so. Run
+  the .cmd, or run HERO.exe --setup.
+
+  Already have an older test build of HERO installed? Uninstall it first.
+
+WINDOWS WILL WARN YOU
+  This build is not code-signed, so Windows SmartScreen shows "Windows
+  protected your PC". Click "More info", then "Run anyway".
+
+  Some antivirus may flag it too. An unsigned program that registers a
+  system service matches the same heuristics a malicious installer does.
+
+  If Smart App Control is turned on, Windows blocks unsigned programs
+  outright and there is no "Run anyway". HERO cannot be installed on that
+  machine until it is code-signed.
+
+WHAT IT INSTALLS
+  C:\Program Files\HERO    the program
+  C:\ProgramData\HERO      everything it records: timeline, vault, baseline
+  A Windows service, "HeroGuardian", running as LocalSystem and starting
+  at every boot.
+  A Start menu shortcut, and a desktop one if you tick the box.
+  An entry in Settings > Apps, so it can be removed cleanly.
+
+  HERO itself runs WITHOUT administrator rights after installation.
+
+HOW TO UNINSTALL
+  Settings > Apps > HERO > Uninstall, or run HERO.exe --setup and choose
+  Uninstall.
+
+  Do NOT just delete the folder. That leaves the guardian service registered
+  as LocalSystem and starting at every boot, with nothing left that knows
+  how to remove it.
+
+  Uninstalling KEEPS C:\ProgramData\HERO, so a reinstall picks up where it
+  left off. Delete that folder by hand if you want it gone.
+
+  If HERO blocked a program's network access, undo the block in HERO BEFORE
+  uninstalling. A block expires after 24 hours, but it is only removed the
+  next time HERO's guardian starts after that -- normally the next restart --
+  so after an uninstall nothing removes it and it stays. Left-over blocks are
+  in Windows Defender Firewall as rules named "HERO-Block ..." in the group
+  "HERO Containment"; delete them there.
+
+NETWORK
+  HERO makes one kind of network request, and you can switch it off: a
+  reverse DNS lookup to name the addresses your programs are connected to.
+  No telemetry, no account, no cloud service.
+
+LICENCE
+  Apache-2.0 -- see LICENSE and NOTICE. This build embeds Microsoft's .NET
+  runtime and WPF assemblies, which are MIT-licensed; their notices are in
+  THIRD-PARTY-NOTICES.txt. Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll
+  are Microsoft's, under the Windows SDK licence terms
+  (https://aka.ms/WinSDKLicenseURL), not MIT.
+
+  Supplied AS IS, without warranties of any kind. HERO can terminate
+  processes and quarantine files. Read sections 7 and 8 of the licence
+  before running it on a machine holding anything you cannot lose.

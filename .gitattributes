@@ -1,0 +1,6 @@
+# Files that strangers run or read on Windows are pinned to CRLF regardless of the cloning
+# machine's core.autocrlf. cmd.exe's batch parser seeks by byte offset and mis-handles labels and
+# goto/call in a script with bare LF endings; Install HERO.cmd has no labels today, but the next
+# edit could add one, and that is not a bug worth leaving for a stranger to find.
+*.cmd               text eol=crlf
+packaging/*.txt     text eol=crlf

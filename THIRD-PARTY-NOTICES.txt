@@ -2,9 +2,17 @@ THIRD-PARTY NOTICES FOR HERO
 ============================
 
 HERO itself takes no third-party dependencies. The notices below cover the .NET
-runtime and WPF assemblies that a self-contained build embeds into HERO.exe.
+runtime and WPF assemblies that a self-contained build ships beside HERO.exe.
 
-Reproduced verbatim from microsoft.netcore.app.runtime.win-x64 10.0.11.
+Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll are not covered by the
+notices below. They come from the Microsoft.Windows.SDK.NET.Ref package, which
+declares them licensed under the Microsoft Windows SDK licence terms:
+https://aka.ms/WinSDKLicenseURL
+
+Reproduced verbatim from microsoft.netcore.app.runtime.win-x64 10.0.13. The WPF
+runtime pack, microsoft.windowsdesktop.app.runtime.win-x64 10.0.13, is licensed
+under the identical MIT licence text below and carries no separate third-party
+notices.
 
 ================================ .NET LICENSE ================================
 

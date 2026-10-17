@@ -115,8 +115,12 @@ To produce the build that is handed to other people — self-contained, so the m
 lands on needs no .NET installed:
 
 ```bash
-dotnet publish src/Hero/Hero.csproj -c Release -r win-x64 --self-contained true -o dist/release
+dotnet publish src/Hero/Hero.csproj -c Release -r win-x64 --self-contained true -p:ContinuousIntegrationBuild=true -o dist/release
 ```
+
+`ContinuousIntegrationBuild` maps the source paths recorded in the shipped symbols to `/_/`, so a
+stack trace from someone else's machine keeps its file names and line numbers without carrying the
+build machine's directory layout.
 
 That command lives here because it has to. `Hero.csproj` sets `SelfContained` to false
 and names no runtime identifier, so those switches are the only record of how the
